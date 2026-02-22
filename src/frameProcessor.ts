@@ -103,13 +103,15 @@ export class FrameProcessor {
     encoding: Encoding
   ): Promise<FrameOut> {
     const rectsForFull = this._splitWholeFrame(rgba.width, rgba.height, this._cfg.fullframeTileCount);
-    const rects: Rect[] = [];
 
-    for (const r of rectsForFull) {
-      const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, encoding);
-      rects.push({ x: r.x, y: r.y, w: r.w, h: r.h, data });
-    }
+    // Encode all tiles in parallel instead of sequentially
+    const rects = await Promise.all(
+      rectsForFull.map(async (r) => {
+        const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
+        const data = await this._encode(raw, r.w, r.h, encoding);
+        return { x: r.x, y: r.y, w: r.w, h: r.h, data } as Rect;
+      })
+    );
 
     for (const t of tilesInfo) this._prev![t.idx] = t.h32;
 
@@ -123,12 +125,15 @@ export class FrameProcessor {
   ): Promise<FrameOut> {
     const mergedRects = this._mergeChangedTiles(tiles, rgba.width, rgba.height);
 
-    const out: Rect[] = [];
-    for (const r of mergedRects) {
-      const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-      const data = await this._encode(raw, r.w, r.h, encoding);
-      out.push({ ...r, data });
-    }
+    // Encode all merged rects in parallel
+    const out = await Promise.all(
+      mergedRects.map(async (r) => {
+        const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
+        const data = await this._encode(raw, r.w, r.h, encoding);
+        return { ...r, data } as Rect;
+      })
+    );
+
     for (const t of tiles) if (t.changed) this._prev![t.idx] = t.h32;
 
     return { rects: out, isFullFrame: false, encoding };
@@ -299,7 +304,7 @@ export class FrameProcessor {
 
   private async _encodeJPEG(rawRgba: Buffer, w: number, h: number): Promise<Buffer> {
     return sharp(rawRgba, { raw: { width: w, height: h, channels: 4 } })
-      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:2:0" })
+      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:4:4" })
       .toBuffer();
   }
 

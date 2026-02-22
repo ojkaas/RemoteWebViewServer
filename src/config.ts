@@ -18,8 +18,8 @@ export type DeviceConfig = {
 const DEFAULTS = {
   tileSize: 32,
   fullFrameTileCount: 4,
-  fullFrameAreaThreshold: 0.5,
-  fullFrameEvery: 50,
+  fullFrameAreaThreshold: 0.25,
+  fullFrameEvery: 15,
   everyNthFrame: 1,
   minFrameInterval: 80,
   jpegQuality: 85,
