@@ -23,6 +23,7 @@ export type DeviceSession = {
   pendingB64?: string;
   throttleTimer?: NodeJS.Timeout;
   fallbackTimer?: NodeJS.Timeout;
+  mutationCaptureTimer?: NodeJS.Timeout;
   lastProcessedMs?: number;
   processing?: boolean;
 };
@@ -82,6 +83,33 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     everyNthFrame: cfg.everyNthFrame
   });
 
+  // --- DOM mutation detection ---
+  // Chrome's compositor doesn't produce screencast frames for DOM-only changes
+  // (no CSS animations). Inject a MutationObserver that signals back via CDP
+  // binding when the page content changes, so we can capture immediately.
+  await session.send('Runtime.enable');
+  await session.send('Runtime.addBinding', { name: '__rwvFrameDirty' });
+
+  await session.send('Page.addScriptToEvaluateOnNewDocument', {
+    source: `(function() {
+    let dirty = false;
+    new MutationObserver(function() {
+      if (!dirty) {
+        dirty = true;
+        requestAnimationFrame(function() {
+          requestAnimationFrame(function() {
+            dirty = false;
+            try { __rwvFrameDirty(); } catch(e) {}
+          });
+        });
+      }
+    }).observe(document.documentElement, {
+      childList: true, subtree: true,
+      attributes: true, characterData: true
+    });
+  })();`
+  });
+
   const processor = new FrameProcessor({
     tileSize: cfg.tileSize,
     fullframeTileCount: cfg.fullFrameTileCount,
@@ -105,6 +133,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     pendingB64: undefined,
     throttleTimer: undefined,
     fallbackTimer: undefined,
+    mutationCaptureTimer: undefined,
     lastProcessedMs: undefined,
     processing: false,
   };
@@ -243,6 +272,29 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   // Kick off the initial fallback timer
   scheduleFallback();
 
+  // --- Listen for DOM mutation signals ---
+  session.on('Runtime.bindingCalled', async (evt: any) => {
+    if (evt.name !== '__rwvFrameDirty') return;
+    if (broadcaster.getClientCount(newDevice.deviceId) === 0) return;
+
+    // Debounce server-side: if a capture is already scheduled, let it handle this
+    if (newDevice.mutationCaptureTimer) return;
+
+    newDevice.mutationCaptureTimer = setTimeout(async () => {
+      newDevice.mutationCaptureTimer = undefined;
+      try {
+        const result: any = await session.send('Page.captureScreenshot', { format: 'png' });
+        if (result?.data) {
+          newDevice.processor.requestFullFrame();
+          newDevice.pendingB64 = result.data;
+          if (!newDevice.throttleTimer) {
+            newDevice.throttleTimer = setTimeout(flushPending, 0);
+          }
+        }
+      } catch { /* session may be closed */ }
+    }, 0);
+  });
+
   return newDevice;
 }
 
@@ -278,6 +330,8 @@ async function deleteDeviceAsync(device: DeviceSession) {
     clearTimeout(device.throttleTimer);
   if (device.fallbackTimer)
     clearTimeout(device.fallbackTimer);
+  if (device.mutationCaptureTimer)
+    clearTimeout(device.mutationCaptureTimer);
 
   try { await device.cdp.send("Page.stopScreencast").catch(() => { }); } catch { }
   try { await root?.send("Target.closeTarget", { targetId: device.id }); } catch { }
