@@ -10,6 +10,10 @@ on:
   #     - 'v*.*.*'
   #     - '*.*.*'
 
+permissions:
+  contents: read
+  packages: write
+
 jobs:
   publish:
     runs-on: ubuntu-latest
@@ -17,7 +21,7 @@ jobs:
     # Unify tag name across events and keep repo name handy.
     env:
       REF_NAME: ${{ github.ref_name || github.event.release.tag_name }}
-      DOCKERHUB_REPO: ${{ vars.DOCKERHUB_REPO }}
+      GHCR_IMAGE: ghcr.io/${{ github.repository_owner }}/remote-webview-server
 
     steps:
       - name: Checkout
@@ -26,11 +30,12 @@ jobs:
           # Fetch full history so metadata-action can parse semver/tag properly.
           fetch-depth: 0
 
-      - name: Login to Docker Hub
+      - name: Login to GHCR
         uses: docker/login-action@v3
         with:
-          username: ${{ secrets.DOCKERHUB_USERNAME }}
-          password: ${{ secrets.DOCKERHUB_TOKEN }}
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
 
       - name: Set up QEMU (for multi-arch builds)
         uses: docker/setup-qemu-action@v3
@@ -42,7 +47,7 @@ jobs:
         id: meta
         uses: docker/metadata-action@v5
         with:
-          images: ${{ env.DOCKERHUB_REPO }}
+          images: ${{ env.GHCR_IMAGE }}
           # Tag strategy:
           # - Always publish the full semver from the git tag (includes -beta/-rc).
           # - Publish short tags (major.minor, major) only for stable tags (no hyphen).
