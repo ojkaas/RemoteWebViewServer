@@ -25,6 +25,14 @@ This fork fixes display latency issues that occur when the server produces frame
 - **Tap event fix** — touch protocol parser now accepts Tap events (was rejecting `kind > Up`, should be `kind > Tap`)
 - **Tuned defaults** — `fullFrameAreaThreshold` 0.5 → 0.25, `fullFrameEvery` 50 → 15 for more responsive updates
 
+### Connection reliability (1.1.4)
+
+- **Forced full frame on reconnect** — when a client reconnects to an existing device session the server now resets the frame hash, takes a `Page.captureScreenshot` and pushes it immediately. Before, a static page hashed identical to the last frame and the reconnecting client (e.g. after an ESP reboot) stayed blank until the page changed.
+- **Early message buffering** — the ESP sends `OpenURL` right after the WebSocket handshake, while the server is still creating the Chromium target. Those messages were silently dropped (the device stayed on `about:blank`); they are now buffered and replayed once the device is ready.
+- **WebSocket heartbeat** — the server pings every peer every `WS_HEARTBEAT_MS` (default 15000) and terminates peers that do not answer, so dead sockets no longer accumulate. The ESP client answers pings automatically.
+- **Forced refresh** — `OpenURL` flag `0x0001` reloads the page even when the URL is unchanged and guarantees the next frame is a full frame (client: `remote_webview.refresh` action).
+- **Broken CDP session recovery** — if the existing Chromium session errors on reconnect, the device is recreated instead of failing the connection.
+
 ## Features
 
 - Renders pages in a headless Chromium environment and streams diffs as tiles over WebSocket
@@ -108,6 +116,7 @@ services:
       PREFERS_REDUCED_MOTION: false
       USER_DATA_DIR: /pw-data
       BROWSER_LOCALE: "en-US"
+      WS_HEARTBEAT_MS: 15000          # ping interval; unresponsive peers are dropped after one interval
     ports:
       - "8081:8081"                   # WebSocket stream
       - "9222:9222"                   # external DevTools via socat

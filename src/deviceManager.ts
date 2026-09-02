@@ -26,6 +26,14 @@ export type DeviceSession = {
   mutationCaptureTimer?: NodeJS.Timeout;
   lastProcessedMs?: number;
   processing?: boolean;
+
+  /**
+   * Take a screenshot of the current page and push it as a full frame.
+   * `force` bypasses the unchanged-hash skip, which is required whenever a
+   * client needs the frame even though the page itself did not change
+   * (reconnect after an ESP reboot, explicit refresh).
+   */
+  captureAndPush: (reason: string, force: boolean) => Promise<void>;
 };
 
 const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_REDUCED_MOTION ?? '');
@@ -33,6 +41,15 @@ const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_RED
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
+
+function screencastParams(cfg: DeviceConfig) {
+  return {
+    format: 'png' as const,
+    maxWidth: cfg.width,
+    maxHeight: cfg.height,
+    everyNthFrame: cfg.everyNthFrame,
+  };
+}
 
 export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<DeviceSession> {
   const root = getRoot();
@@ -42,8 +59,20 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   if (device) {
     if (deviceConfigsEqual(device.cfg, cfg)) {
       device.lastActive = Date.now();
-      device.processor.requestFullFrame();
-      return device;
+      try {
+        // A (re)connecting client has no idea what is on screen. Chrome will
+        // not emit a screencast frame for a page that did not change, and the
+        // unchanged-hash check would skip the fallback screenshot, so push a
+        // forced full frame right now. Restarting the screencast makes sure
+        // the compositor is producing frames again for live updates.
+        await device.cdp.send('Page.stopScreencast').catch(() => { });
+        await device.cdp.send('Page.startScreencast', screencastParams(device.cfg));
+        await device.captureAndPush('reconnect', true);
+        return device;
+      } catch (e) {
+        console.warn(`[device] CDP session broken for ${id}, recreating: ${(e as Error).message}`);
+        await deleteDeviceAsync(device).catch(() => { });
+      }
     } else {
       console.log(`[device] Reconfiguring device ${id}`);
       await deleteDeviceAsync(device);
@@ -76,12 +105,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     });
   }
 
-  await session.send('Page.startScreencast', {
-    format: 'png',
-    maxWidth: cfg.width,
-    maxHeight: cfg.height,
-    everyNthFrame: cfg.everyNthFrame
-  });
+  await session.send('Page.startScreencast', screencastParams(cfg));
 
   // --- DOM mutation detection ---
   // Chrome's compositor doesn't produce screencast frames for DOM-only changes
@@ -136,6 +160,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     mutationCaptureTimer: undefined,
     lastProcessedMs: undefined,
     processing: false,
+    captureAndPush: async () => { },
   };
   devices.set(id, newDevice);
   newDevice.processor.requestFullFrame();
@@ -202,6 +227,25 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     }
   };
 
+  const queueScreenshot = (b64: string, force: boolean) => {
+    if (force) newDevice.prevFrameHash = 0;
+    newDevice.processor.requestFullFrame();
+    newDevice.pendingB64 = b64;
+    if (!newDevice.throttleTimer) {
+      newDevice.throttleTimer = setTimeout(flushPending, 0);
+    }
+  };
+
+  newDevice.captureAndPush = async (reason: string, force: boolean) => {
+    // CDP errors (closed session) propagate to the caller; the periodic
+    // fallback path below swallows them, the reconnect path recreates the device.
+    const result: any = await session.send('Page.captureScreenshot', { format: 'png' });
+    if (result?.data) {
+      console.log(`[device] ${id}: pushing screenshot (${reason}${force ? ', forced' : ''})`);
+      queueScreenshot(result.data, force);
+    }
+  };
+
   // --- Fallback screenshot mechanism ---
   // Chrome's compositor stops producing screencast frames for static pages
   // (no CSS animations). When the screencast goes quiet, we force a
@@ -225,13 +269,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
     try {
       const result: any = await session.send('Page.captureScreenshot', { format: 'png' });
-      if (result?.data) {
-        newDevice.processor.requestFullFrame();
-        newDevice.pendingB64 = result.data;
-        if (!newDevice.throttleTimer) {
-          newDevice.throttleTimer = setTimeout(flushPending, 0);
-        }
-      }
+      if (result?.data) queueScreenshot(result.data, false);
     } catch {
       // Session may be closed — ignore
     }
@@ -283,14 +321,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     newDevice.mutationCaptureTimer = setTimeout(async () => {
       newDevice.mutationCaptureTimer = undefined;
       try {
-        const result: any = await session.send('Page.captureScreenshot', { format: 'png' });
-        if (result?.data) {
-          newDevice.processor.requestFullFrame();
-          newDevice.pendingB64 = result.data;
-          if (!newDevice.throttleTimer) {
-            newDevice.throttleTimer = setTimeout(flushPending, 0);
-          }
-        }
+        await newDevice.captureAndPush('dom-mutation', false);
       } catch { /* session may be closed */ }
     }, 0);
   });

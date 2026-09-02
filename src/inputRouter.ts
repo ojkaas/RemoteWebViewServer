@@ -1,5 +1,5 @@
 import type { DeviceSession } from "./deviceManager.js";
-import { TouchKind, parseFrameStatsPacket, parseOpenURLPacket, parseTouchPacket } from "./protocol.js";
+import { FLAG_OPENURL_FORCE, TouchKind, parseFrameStatsPacket, parseOpenURLPacket, parseTouchPacket } from "./protocol.js";
 import { mapPointForRotation } from "./util.js";
 
 export class InputRouter {
@@ -37,10 +37,20 @@ export class InputRouter {
       } else {
         dev.selfTestRunner.stop();
 
+        const force = (pkt.flags & FLAG_OPENURL_FORCE) !== 0;
         if (dev.url !== pkt.url) {
           console.log(`[inputRouter] Navigating ${dev.deviceId} to ${pkt.url}`);
           await dev.cdp.send('Page.navigate', { url: pkt.url });
           dev.url = pkt.url;
+        } else if (force) {
+          console.log(`[inputRouter] Reloading ${dev.deviceId} (${pkt.url})`);
+          await dev.cdp.send('Page.reload', { ignoreCache: false });
+        }
+        if (force) {
+          // The client explicitly wants a fresh picture: make sure the next
+          // frame is a full frame and is not skipped as "unchanged".
+          dev.prevFrameHash = 0;
+          dev.processor.requestFullFrame();
         }
       }
   }
