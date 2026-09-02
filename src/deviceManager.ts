@@ -35,6 +35,7 @@ export type DeviceSession = {
   // full, so Chrome does not capture+encode+ship frames nobody can use.
   screencastPaused: boolean;
   screencastPauses: number;
+  captureTimer?: NodeJS.Timeout;   // ondemand: scheduled resume
 
   // stats
   screencastFrames: number;
@@ -294,12 +295,34 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       dev.lastProcessedMs = Date.now();
       // Release Chrome for the next capture now that this one is consumed.
       for (const sid of screencastToAck) ackScreencast(sid);
+      if (cfg.screencastMode === 'ondemand') scheduleNextCapture();
 
       // Process any frame that arrived during encoding
       if (dev.pendingB64 && !dev.throttleTimer) {
         dev.throttleTimer = setTimeout(flushPending, 0);
       }
     }
+  };
+
+  // ondemand mode: Chromium is paused after every capture; resume exactly
+  // when the pipeline can take the next frame (min interval elapsed and an
+  // ack slot free), so captures == frames sent instead of ~2x.
+  const scheduleNextCapture = () => {
+    if (newDevice.captureTimer) return;
+    const since = newDevice.lastProcessedMs ? Date.now() - newDevice.lastProcessedMs : Infinity;
+    const delay = Math.max(0, cfg.minFrameInterval - (Number.isFinite(since) ? since : 0));
+    newDevice.captureTimer = setTimeout(() => {
+      newDevice.captureTimer = undefined;
+      if (broadcaster.getClientCount(newDevice.deviceId) === 0) return;
+      if (!broadcaster.canSend(id)) {
+        if (!newDevice.waitingForAck) {
+          newDevice.waitingForAck = true;
+          broadcaster.onReady(id, () => { newDevice.waitingForAck = false; resumeScreencast(); });
+        }
+        return;
+      }
+      resumeScreencast();
+    }, delay);
   };
 
   const pauseScreencast = () => {
@@ -398,6 +421,16 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     // withholding acks (Chrome has no small in-flight limit to lean on).
     ackScreencast(evt.sessionId);
 
+    if (cfg.screencastMode === 'ondemand') {
+      if (newDevice.screencastPaused) return;   // stray frame after a pause
+      newDevice.lastActive = Date.now();
+      newDevice.lastCaptureAt = Date.now();
+      newDevice.pendingB64 = evt.data;
+      pauseScreencast();                        // exactly one capture per resume
+      if (!newDevice.throttleTimer) newDevice.throttleTimer = setTimeout(flushPending, 0);
+      return;
+    }
+
     newDevice.lastActive = Date.now();
     newDevice.lastCaptureAt = Date.now();
     newDevice.pendingB64 = evt.data;
@@ -465,6 +498,7 @@ export function getDevicesSnapshot() {
     avgRectsPerFrame: d.timing.n ? Math.round(d.timing.rects / d.timing.n * 10) / 10 : null,
     avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,
     screencastFormat: d.cfg.screencastFormat,
+    screencastMode: d.cfg.screencastMode,
     chroma: d.cfg.chroma,
     reducedMotion: d.cfg.reducedMotion,
     waitingForAck: !!d.waitingForAck,
@@ -507,6 +541,8 @@ async function deleteDeviceAsync(device: DeviceSession) {
     clearTimeout(device.fallbackTimer);
   if (device.mutationCaptureTimer)
     clearTimeout(device.mutationCaptureTimer);
+  if (device.captureTimer)
+    clearTimeout(device.captureTimer);
 
   try { await device.cdp.send("Page.stopScreencast").catch(() => { }); } catch { }
   try { await root?.send("Target.closeTarget", { targetId: device.id }); } catch { }

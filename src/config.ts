@@ -17,6 +17,7 @@ export type DeviceConfig = {
   screencastFormat: 'png' | 'jpeg';  // Chrome capture format
   screencastQuality: number;        // 1..100, jpeg only
   reducedMotion: boolean;           // emulate prefers-reduced-motion for this device
+  screencastMode: 'stream' | 'ondemand'; // ondemand: one Chromium capture per frame we want
 };
 
 const DEFAULTS = {
@@ -33,6 +34,7 @@ const DEFAULTS = {
   screencastFormat: 'png',
   screencastQuality: 90,
   reducedMotion: false,
+  screencastMode: 'stream',
 } as const;
 
 const store = new Map<string, DeviceConfig>();
@@ -122,6 +124,8 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const screencastFormat: 'png' | 'jpeg' = scfRaw && /^jpe?g$/i.test(scfRaw) ? 'jpeg' : DEFAULTS.screencastFormat;
   const prmRaw = params.get("prm");
   const reducedMotion = prmRaw != null ? /^(1|true|yes|on)$/i.test(prmRaw) : /^(1|true|yes|on)$/i.test(env.get("PREFERS_REDUCED_MOTION").asString() ?? '');
+  const scmRaw = params.get("scm") ?? env.get("SCREENCAST_MODE").asString();
+  const screencastMode: 'stream' | 'ondemand' = scmRaw && /^on-?demand$/i.test(scmRaw) ? 'ondemand' : DEFAULTS.screencastMode;
   const screencastQuality = clamp(intPos(params.get("scq")) ?? intPos(env.get("SCREENCAST_JPEG_QUALITY").asString()) ?? DEFAULTS.screencastQuality, 1, 100);
 
   const dimensions = getRotatedDimensions(width, height, rotation);
@@ -142,6 +146,7 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     screencastFormat,
     screencastQuality,
     reducedMotion,
+    screencastMode,
   };
 }
 
@@ -165,7 +170,8 @@ export function deviceConfigsEqual(
     a.chroma === b.chroma &&
     a.screencastFormat === b.screencastFormat &&
     a.screencastQuality === b.screencastQuality &&
-    a.reducedMotion === b.reducedMotion
+    a.reducedMotion === b.reducedMotion &&
+    a.screencastMode === b.screencastMode
   );
 }
 
@@ -186,6 +192,7 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
     ["screencastFormat", cfg.screencastFormat],
     ["screencastQuality", cfg.screencastQuality],
     ["reducedMotion", String(cfg.reducedMotion)],
+    ["screencastMode", cfg.screencastMode],
   ];
 
   const head = `[client_connect] id=${id}`;
