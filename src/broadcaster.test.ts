@@ -35,7 +35,7 @@ describe("DeviceBroadcaster ack flow control", () => {
   });
 
   it("blocks after one frame until the ack arrives", async () => {
-    const b = new DeviceBroadcaster();
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
     const ws = new FakeWs();
     b.addClient("d", ws as any, { ack: true });
     expect(b.isAckMode("d")).toBe(true);
@@ -58,7 +58,7 @@ describe("DeviceBroadcaster ack flow control", () => {
   });
 
   it("ignores stale acks and accepts newer ones", async () => {
-    const b = new DeviceBroadcaster();
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
     const ws = new FakeWs();
     b.addClient("d", ws as any, { ack: true });
     b.sendFrameChunked("d", frame(), 5);
@@ -71,7 +71,7 @@ describe("DeviceBroadcaster ack flow control", () => {
   it("writes off a frame after the ack timeout", () => {
     vi.useFakeTimers();
     try {
-      const b = new DeviceBroadcaster();
+      const b = new DeviceBroadcaster({ maxInflight: 1 });
       const ws = new FakeWs();
       b.addClient("d", ws as any, { ack: true });
       b.sendFrameChunked("d", frame(), 1);
@@ -84,8 +84,37 @@ describe("DeviceBroadcaster ack flow control", () => {
     }
   });
 
+  it("allows N frames in flight and releases older ones on a newer ack", () => {
+    const b = new DeviceBroadcaster({ maxInflight: 2 });
+    const ws = new FakeWs();
+    b.addClient("d", ws as any, { ack: true });
+    b.sendFrameChunked("d", frame(), 1);
+    expect(b.canSend("d")).toBe(true);
+    b.sendFrameChunked("d", frame(), 2);
+    expect(b.canSend("d")).toBe(false);
+    expect(b.getStats("d")!.inflightCount).toBe(2);
+    b.handleFrameAck("d", 2);
+    expect(b.getStats("d")!.inflightCount).toBe(0);
+    expect(b.canSend("d")).toBe(true);
+  });
+
+  it("keeps counters across a reconnect and drops them on forgetDevice", () => {
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
+    const ws1 = new FakeWs();
+    b.addClient("d", ws1 as any, { ack: true });
+    b.sendFrameChunked("d", frame(), 1);
+    ws1.close();
+    expect(b.getClientCount("d")).toBe(0);
+    expect(b.getStats("d")!.framesSent).toBe(1);
+    const ws2 = new FakeWs();
+    b.addClient("d", ws2 as any, { ack: true });
+    expect(b.getStats("d")!.framesSent).toBe(1);
+    b.forgetDevice("d");
+    expect(b.getStats("d")).toBeNull();
+  });
+
   it("clears in-flight state when the client reconnects", () => {
-    const b = new DeviceBroadcaster();
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
     const ws1 = new FakeWs();
     b.addClient("d", ws1 as any, { ack: true });
     b.sendFrameChunked("d", frame(), 1);

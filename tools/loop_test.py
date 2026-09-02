@@ -34,7 +34,7 @@ def fmt(d: dict) -> str:
     return (f"clients={t.get('clients')} ack={int(bool(t.get('ackMode')))} "
             f"fps={t.get('fps')} sent={t.get('framesSent')} acks={t.get('acksReceived')} "
             f"ackLat={t.get('lastAckLatencyMs')}ms avgAck={t.get('avgAckLatencyMs')}ms "
-            f"timeouts={t.get('ackTimeouts')} inflight={t.get('inflightFrameId')} "
+            f"timeouts={t.get('ackTimeouts')} inflight={t.get('inflightCount')}/{t.get('maxInflight')} fid={d.get('frameId')} "
             f"proc={d.get('lastProcessMs')}ms sc={d.get('screencastFrames')} "
             f"skip={d.get('skippedUnchanged')} url={d.get('url')}")
 
@@ -97,15 +97,16 @@ def main() -> int:
     if args.no_kick:
         return 0
 
-    sent_before = t["framesSent"]
-    acks_before = t["acksReceived"]
+    # dev.frameId is monotonic for the life of the device session, unlike the
+    # transport counters which a server restart resets.
+    fid_before = d["frameId"]
 
     print("kicking device by connecting with its id ...")
     asyncio.run(kick(args.server, d))
 
     d2, dt = wait_for(args.server, device_id,
                       lambda x: (x["transport"] or {}).get("clients", 0) >= 1
-                      and (x["transport"] or {}).get("framesSent", 0) > sent_before,
+                      and x["frameId"] > fid_before,
                       timeout_s=25, label="reconnect")
     if dt is None:
         print("FAIL: device did not reconnect and receive a frame within 25 s")
@@ -114,9 +115,11 @@ def main() -> int:
     print(f"PASS: reconnected and received forced frame after {dt:.1f}s")
 
     if t.get("ackMode"):
+        acks_at_reconnect = (d2["transport"] or {}).get("acksReceived", 0)
         d3, dt2 = wait_for(args.server, device_id,
-                           lambda x: (x["transport"] or {}).get("acksReceived", 0) > acks_before
-                           and (x["transport"] or {}).get("inflightFrameId") is None,
+                           # two acks after the reconnect frame proves the ack path is live;
+                           # inflight rarely reads 0 on an animating page with pipelining
+                           lambda x: (x["transport"] or {}).get("acksReceived", 0) >= acks_at_reconnect + 2,
                            timeout_s=10, label="ack")
         if dt2 is None:
             print("FAIL: reconnect frame was not acked within 10 s")

@@ -10,7 +10,9 @@ export type DeviceStats = {
   clients: number;
   ackClients: number;
   ackMode: boolean;
-  inflightFrameId: number | null;
+  inflightFrameId: number | null;   // oldest unacked frame
+  inflightCount: number;
+  maxInflight: number;
   inflightAgeMs: number | null;
   framesSent: number;
   bytesSent: number;
@@ -26,7 +28,7 @@ export type DeviceStats = {
 type BroadcasterState = {
   queue: OutFrame[];
   sending: boolean;
-  inflight?: Inflight;
+  inflight: Inflight[];   // oldest first
   readyCallbacks: Array<() => void>;
   // stats
   framesSent: number;
@@ -52,12 +54,21 @@ const BACKPRESSURE_LOW = 16 * 1024;
 // Ack-based flow control: a frame is considered lost if the client did not
 // ack it within this time; the next frame is then sent regardless.
 export const ACK_TIMEOUT_MS = 3000;
+// Frames allowed in flight per device in ack mode. 1 = strictly serial
+// (lowest latency), 2 = encode the next frame while the client decodes the
+// previous one (about double the throughput, worst-case latency two frames).
+export const DEFAULT_MAX_INFLIGHT = Math.max(1, Number(process.env.ACK_MAX_INFLIGHT ?? 2) || 2);
 const FPS_WINDOW_MS = 5000;
 
 export class DeviceBroadcaster {
   private _clients = new Map<string, Set<WebSocket>>();
   private _ackPeers = new WeakSet<WebSocket>();
   private _state = new Map<string, BroadcasterState>();
+  private readonly _maxInflight: number;
+
+  constructor(opts: { maxInflight?: number } = {}) {
+    this._maxInflight = Math.max(1, opts.maxInflight ?? DEFAULT_MAX_INFLIGHT);
+  }
 
   addClient(id: string, ws: WebSocket, opts: { ack?: boolean } = {}): void {
     const old = this._clients.get(id);
@@ -74,7 +85,8 @@ export class DeviceBroadcaster {
 
     const st = this._ensureState(id);
     // A fresh connection has nothing in flight, whatever the old one had.
-    st.inflight = undefined;
+    st.inflight = [];
+    st.queue.length = 0;
     this._fireReady(st);
 
     console.log(`[broadcaster] Client connected to device ${id} (ack=${opts.ack ? 1 : 0}), total clients: ${this._clients.get(id)?.size}`);
@@ -84,14 +96,16 @@ export class DeviceBroadcaster {
 
   removeClient(id: string, ws: WebSocket): void {
     this._clients.get(id)?.delete(ws);
-    if ((this._clients.get(id)?.size ?? 0) === 0) {
-      this._clients.delete(id);
-      this._state.delete(id);
-    } else {
-      const st = this._state.get(id);
-      if (st) { st.inflight = undefined; this._fireReady(st); }
-    }
+    if ((this._clients.get(id)?.size ?? 0) === 0) this._clients.delete(id);
+    // Keep the per-device stats across reconnects; only the transport state
+    // is reset. forgetDevice() drops everything when the device is deleted.
+    const st = this._state.get(id);
+    if (st) { st.inflight = []; st.queue.length = 0; this._fireReady(st); }
     console.log(`[broadcaster] Client disconnected from device ${id}, total clients: ${this._clients.get(id)?.size ?? 0}`);
+  }
+
+  forgetDevice(id: string): void {
+    this._state.delete(id);
   }
 
   getClientCount(id: string): number {
@@ -114,15 +128,14 @@ export class DeviceBroadcaster {
   canSend(id: string): boolean {
     if (!this.isAckMode(id)) return true;
     const st = this._state.get(id);
-    if (!st?.inflight) return true;
-    const age = Date.now() - st.inflight.sentAt;
-    if (age >= ACK_TIMEOUT_MS) {
+    if (!st) return true;
+    const now = Date.now();
+    while (st.inflight.length && now - st.inflight[0].sentAt >= ACK_TIMEOUT_MS) {
+      const dead = st.inflight.shift()!;
       st.ackTimeouts++;
-      console.warn(`[broadcaster] ${id}: no ack for frame ${st.inflight.frameId} after ${age}ms, continuing`);
-      st.inflight = undefined;
-      return true;
+      console.warn(`[broadcaster] ${id}: no ack for frame ${dead.frameId} after ${now - dead.sentAt}ms, continuing`);
     }
-    return false;
+    return st.inflight.length < this._maxInflight;
   }
 
   /** Register a one-shot callback for when the device becomes ready to send. */
@@ -130,8 +143,8 @@ export class DeviceBroadcaster {
     const st = this._ensureState(id);
     st.readyCallbacks.push(cb);
     // Arm a timer so a lost ack does not stall the pipeline forever.
-    if (st.inflight) {
-      const wait = Math.max(0, ACK_TIMEOUT_MS - (Date.now() - st.inflight.sentAt)) + 1;
+    if (st.inflight.length) {
+      const wait = Math.max(0, ACK_TIMEOUT_MS - (Date.now() - st.inflight[0].sentAt)) + 1;
       setTimeout(() => { if (this.canSend(id)) this._fireReady(st); }, wait).unref?.();
     } else {
       this._fireReady(st);
@@ -142,14 +155,16 @@ export class DeviceBroadcaster {
     const st = this._state.get(id);
     if (!st) return;
     st.acksReceived++;
-    const inflight = st.inflight;
-    if (inflight && ((frameId - inflight.frameId) | 0) >= 0) {
-      const latency = Date.now() - inflight.sentAt;
+    // An ack covers the acked frame and everything older.
+    let released = 0;
+    while (st.inflight.length && ((frameId - st.inflight[0].frameId) | 0) >= 0) {
+      const f = st.inflight.shift()!;
+      const latency = Date.now() - f.sentAt;
       st.lastAckLatencyMs = latency;
       st.ackLatencySum += latency;
-      st.inflight = undefined;
-      this._fireReady(st);
+      released++;
     }
+    if (released) this._fireReady(st);
   }
 
   public sendFrameChunked(id: string, data: FrameOut, frameId: number, maxBytes = 12_000): void {
@@ -167,7 +182,7 @@ export class DeviceBroadcaster {
     st.lastSentAt = now;
     st.sentTimes.push(now);
     while (st.sentTimes.length && now - st.sentTimes[0] > FPS_WINDOW_MS) st.sentTimes.shift();
-    if (this.isAckMode(id)) st.inflight = { frameId, sentAt: now, bytes };
+    if (this.isAckMode(id)) st.inflight.push({ frameId, sentAt: now, bytes });
 
     st.queue.push({ frameId, packets });
     this._drainAsync(id).catch(() => {});
@@ -194,8 +209,10 @@ export class DeviceBroadcaster {
       clients: this.getClientCount(id),
       ackClients,
       ackMode: ackClients > 0,
-      inflightFrameId: st.inflight?.frameId ?? null,
-      inflightAgeMs: st.inflight ? now - st.inflight.sentAt : null,
+      inflightFrameId: st.inflight[0]?.frameId ?? null,
+      inflightCount: st.inflight.length,
+      maxInflight: this._maxInflight,
+      inflightAgeMs: st.inflight.length ? now - st.inflight[0].sentAt : null,
       framesSent: st.framesSent,
       bytesSent: st.bytesSent,
       ackTimeouts: st.ackTimeouts,
@@ -219,7 +236,7 @@ export class DeviceBroadcaster {
     let st = this._state.get(id);
     if (!st) {
       st = {
-        queue: [], sending: false, readyCallbacks: [],
+        queue: [], sending: false, inflight: [], readyCallbacks: [],
         framesSent: 0, bytesSent: 0, ackTimeouts: 0, acksReceived: 0, ackLatencySum: 0, sentTimes: [],
       };
       this._state.set(id, st);

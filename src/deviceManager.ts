@@ -27,6 +27,10 @@ export type DeviceSession = {
   lastProcessedMs?: number;
   processing?: boolean;
   waitingForAck?: boolean;
+  // Chrome screencast frame not yet acked. Chrome allows only a couple of
+  // un-acked frames, so withholding the ack throttles its capture rate to
+  // what the pipeline can actually use (instead of 50+ PNGs/s over CDP).
+  pendingScreencastSession?: number;
 
   // stats
   screencastFrames: number;
@@ -74,6 +78,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         // forced full frame right now. Restarting the screencast makes sure
         // the compositor is producing frames again for live updates.
         await device.cdp.send('Page.stopScreencast').catch(() => { });
+        device.pendingScreencastSession = undefined;  // old session ids are void
         await device.cdp.send('Page.startScreencast', screencastParams(device.cfg));
         await device.captureAndPush('reconnect', true);
         return device;
@@ -210,6 +215,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
     const b64 = dev.pendingB64;
     dev.pendingB64 = undefined;
+    const screencastToAck = dev.pendingScreencastSession;
+    dev.pendingScreencastSession = undefined;
 
     dev.processing = true;
     const t0 = Date.now();
@@ -244,12 +251,19 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     } finally {
       dev.processing = false;
       dev.lastProcessedMs = Date.now();
+      // Release Chrome for the next capture now that this one is consumed.
+      ackScreencast(screencastToAck);
 
       // Process any frame that arrived during encoding
       if (dev.pendingB64 && !dev.throttleTimer) {
         dev.throttleTimer = setTimeout(flushPending, 0);
       }
     }
+  };
+
+  const ackScreencast = (sessionId?: number) => {
+    if (sessionId === undefined) return;
+    session.send('Page.screencastFrameAck', { sessionId }).catch(() => { });
   };
 
   const queueScreenshot = (b64: string, force: boolean) => {
@@ -306,17 +320,22 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   };
 
   session.on('Page.screencastFrame', async (evt: any) => {
-    // ACK immediately to keep producer running
-    session.send('Page.screencastFrameAck', { sessionId: evt.sessionId }).catch(() => { });
-
     // Reset fallback timer — screencast is active, no fallback needed
     scheduleFallback();
 
     newDevice.screencastFrames++;
     const now = Date.now();
 
-    if (broadcaster.getClientCount(newDevice.deviceId) === 0)
+    if (broadcaster.getClientCount(newDevice.deviceId) === 0) {
+      // Nobody watching: ack right away so Chrome keeps the page alive but
+      // don't process anything.
+      ackScreencast(evt.sessionId);
       return;
+    }
+    // A newer capture supersedes an unconsumed one: release the old one.
+    ackScreencast(newDevice.pendingScreencastSession);
+    newDevice.pendingScreencastSession = evt.sessionId;
+
     newDevice.lastActive = Date.now();
     newDevice.pendingB64 = evt.data;
 
@@ -409,4 +428,5 @@ async function deleteDeviceAsync(device: DeviceSession) {
 
   try { await device.cdp.send("Page.stopScreencast").catch(() => { }); } catch { }
   try { await root?.send("Target.closeTarget", { targetId: device.id }); } catch { }
+  broadcaster.forgetDevice(device.deviceId);
 }
