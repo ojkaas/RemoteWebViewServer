@@ -477,6 +477,7 @@ export function getDevicesSnapshot() {
   return Array.from(devices.values()).map(d => ({
     id: d.deviceId,
     url: d.url,
+    cfg: d.cfg,
     width: d.cfg.width,
     height: d.cfg.height,
     tileSize: d.cfg.tileSize,

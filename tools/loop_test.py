@@ -39,10 +39,24 @@ def fmt(d: dict) -> str:
             f"skip={d.get('skippedUnchanged')} url={d.get('url')}")
 
 
+def device_params(device: dict) -> str:
+    """Replay the device's exact config so the server does not reconfigure the
+    session (a differing config would recreate the Chromium target)."""
+    c = device.get("cfg") or {}
+    m = {"w": c.get("width", device["width"]), "h": c.get("height", device["height"]), "ts": c.get("tileSize", device["tileSize"]),
+         "fftc": c.get("fullFrameTileCount"), "ffat": c.get("fullFrameAreaThreshold"), "ffe": c.get("fullFrameEvery"),
+         "enf": c.get("everyNthFrame"), "mfi": c.get("minFrameInterval"), "q": c.get("jpegQuality"), "mbpm": c.get("maxBytesPerMessage"),
+         "r": c.get("rotation"), "chroma": (c.get("chroma") or "").replace(":", ""), "scf": c.get("screencastFormat"),
+         "scq": c.get("screencastQuality"), "prm": 1 if c.get("reducedMotion") else None, "scm": c.get("screencastMode"), "ack": 1}
+    # rotation: the server stores rotated width/height; send the unrotated ones back
+    if m["r"] in (90, 270):
+        m["w"], m["h"] = m["h"], m["w"]
+    return "&".join(f"{k}={v}" for k, v in m.items() if v is not None and v != "")
+
+
 async def kick(server: str, device: dict) -> None:
     import websockets  # type: ignore
-    uri = (f"ws://{server}/?id={device['id']}&w={device['width']}&h={device['height']}"
-           f"&ts={device['tileSize']}&q={device['jpegQuality']}&mfi={device['minFrameInterval']}")
+    uri = f"ws://{server}/?id={device['id']}&{device_params(device)}"
     async with websockets.connect(uri, max_size=None):
         await asyncio.sleep(0.2)
 
@@ -104,9 +118,12 @@ def main() -> int:
     print("kicking device by connecting with its id ...")
     asyncio.run(kick(args.server, d))
 
+    # Reconnected = a client is attached again and it has drawn something new:
+    # frameId advanced (same session) or the session was recreated (frameId reset).
+    t_kick = time.time()
     d2, dt = wait_for(args.server, device_id,
                       lambda x: (x["transport"] or {}).get("clients", 0) >= 1
-                      and x["frameId"] > fid_before,
+                      and (x["frameId"] > fid_before or (x["ageMs"] / 1000 < time.time() - t_kick and x["frameId"] >= 1)),
                       timeout_s=25, label="reconnect")
     if dt is None:
         print("FAIL: device did not reconnect and receive a frame within 25 s")
