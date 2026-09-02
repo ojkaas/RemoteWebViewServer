@@ -3,21 +3,63 @@ import { buildFrameStatsPacket, buildFramePackets } from "./protocol.js";
 import type { FrameOut } from "./frameProcessor.js";
 
 type OutFrame = { frameId: number; packets: Buffer[] };
-type BroadcasterState = { queue: OutFrame[]; sending: boolean };
 
-// Rate limiting: minimum gap between frames sent to each client.
-// Prevents TCP buffer bloat when the server produces frames faster
-// than ESP32 WiFi can absorb them (animation at 48fps → ~40s latency).
-const MIN_FRAME_GAP_MS = 100;    // ~10fps max output rate
-const DRAIN_POLL_MS = 5;         // poll interval while waiting for drain
-const DRAIN_MAX_MS = 2000;       // max wait for buffer drain
+type Inflight = { frameId: number; sentAt: number; bytes: number };
+
+export type DeviceStats = {
+  clients: number;
+  ackClients: number;
+  ackMode: boolean;
+  inflightFrameId: number | null;
+  inflightAgeMs: number | null;
+  framesSent: number;
+  bytesSent: number;
+  ackTimeouts: number;
+  acksReceived: number;
+  lastAckLatencyMs: number | null;
+  avgAckLatencyMs: number | null;
+  fps: number;                 // frames sent over the last FPS_WINDOW_MS
+  lastFrameId: number | null;
+  lastSentAgeMs: number | null;
+};
+
+type BroadcasterState = {
+  queue: OutFrame[];
+  sending: boolean;
+  inflight?: Inflight;
+  readyCallbacks: Array<() => void>;
+  // stats
+  framesSent: number;
+  bytesSent: number;
+  ackTimeouts: number;
+  acksReceived: number;
+  lastAckLatencyMs?: number;
+  ackLatencySum: number;
+  lastFrameId?: number;
+  lastSentAt?: number;
+  sentTimes: number[];
+};
+
+// Legacy pacing (clients that do not send FrameAck): minimum gap between
+// frames plus a userspace-buffer drain wait. Note that ws.bufferedAmount only
+// covers Node's buffers, not the kernel send buffer, which is why ack-based
+// flow control below is preferred.
+const MIN_FRAME_GAP_MS = 100;
+const DRAIN_POLL_MS = 5;
+const DRAIN_MAX_MS = 2000;
 const BACKPRESSURE_LOW = 16 * 1024;
+
+// Ack-based flow control: a frame is considered lost if the client did not
+// ack it within this time; the next frame is then sent regardless.
+export const ACK_TIMEOUT_MS = 3000;
+const FPS_WINDOW_MS = 5000;
 
 export class DeviceBroadcaster {
   private _clients = new Map<string, Set<WebSocket>>();
+  private _ackPeers = new WeakSet<WebSocket>();
   private _state = new Map<string, BroadcasterState>();
 
-  addClient(id: string, ws: WebSocket): void {
+  addClient(id: string, ws: WebSocket, opts: { ack?: boolean } = {}): void {
     const old = this._clients.get(id);
     if (old && old.size) {
       for (const sock of old) {
@@ -28,10 +70,14 @@ export class DeviceBroadcaster {
 
     if (!this._clients.has(id)) this._clients.set(id, new Set());
     this._clients.get(id)!.add(ws);
+    if (opts.ack) this._ackPeers.add(ws);
 
-    if (!this._state.has(id)) this._state.set(id, { queue: [], sending: false });
+    const st = this._ensureState(id);
+    // A fresh connection has nothing in flight, whatever the old one had.
+    st.inflight = undefined;
+    this._fireReady(st);
 
-    console.log(`[broadcaster] Client connected to device ${id}, total clients: ${this._clients.get(id)?.size}`);
+    console.log(`[broadcaster] Client connected to device ${id} (ack=${opts.ack ? 1 : 0}), total clients: ${this._clients.get(id)?.size}`);
     ws.once("close", () => this.removeClient(id, ws));
     ws.once("error", () => this.removeClient(id, ws));
   }
@@ -41,6 +87,9 @@ export class DeviceBroadcaster {
     if ((this._clients.get(id)?.size ?? 0) === 0) {
       this._clients.delete(id);
       this._state.delete(id);
+    } else {
+      const st = this._state.get(id);
+      if (st) { st.inflight = undefined; this._fireReady(st); }
     }
     console.log(`[broadcaster] Client disconnected from device ${id}, total clients: ${this._clients.get(id)?.size ?? 0}`);
   }
@@ -49,13 +98,77 @@ export class DeviceBroadcaster {
     return this._clients.get(id)?.size ?? 0;
   }
 
+  /** True when at least one connected peer of this device sends FrameAck. */
+  isAckMode(id: string): boolean {
+    const peers = this._clients.get(id);
+    if (!peers) return false;
+    for (const ws of peers) if (this._ackPeers.has(ws)) return true;
+    return false;
+  }
+
+  /**
+   * Whether a new frame may be produced for this device right now. In ack
+   * mode this is false while a frame is in flight (until its ack, or until
+   * ACK_TIMEOUT_MS has passed, in which case the frame is written off).
+   */
+  canSend(id: string): boolean {
+    if (!this.isAckMode(id)) return true;
+    const st = this._state.get(id);
+    if (!st?.inflight) return true;
+    const age = Date.now() - st.inflight.sentAt;
+    if (age >= ACK_TIMEOUT_MS) {
+      st.ackTimeouts++;
+      console.warn(`[broadcaster] ${id}: no ack for frame ${st.inflight.frameId} after ${age}ms, continuing`);
+      st.inflight = undefined;
+      return true;
+    }
+    return false;
+  }
+
+  /** Register a one-shot callback for when the device becomes ready to send. */
+  onReady(id: string, cb: () => void): void {
+    const st = this._ensureState(id);
+    st.readyCallbacks.push(cb);
+    // Arm a timer so a lost ack does not stall the pipeline forever.
+    if (st.inflight) {
+      const wait = Math.max(0, ACK_TIMEOUT_MS - (Date.now() - st.inflight.sentAt)) + 1;
+      setTimeout(() => { if (this.canSend(id)) this._fireReady(st); }, wait).unref?.();
+    } else {
+      this._fireReady(st);
+    }
+  }
+
+  handleFrameAck(id: string, frameId: number): void {
+    const st = this._state.get(id);
+    if (!st) return;
+    st.acksReceived++;
+    const inflight = st.inflight;
+    if (inflight && ((frameId - inflight.frameId) | 0) >= 0) {
+      const latency = Date.now() - inflight.sentAt;
+      st.lastAckLatencyMs = latency;
+      st.ackLatencySum += latency;
+      st.inflight = undefined;
+      this._fireReady(st);
+    }
+  }
+
   public sendFrameChunked(id: string, data: FrameOut, frameId: number, maxBytes = 12_000): void {
     const peers = this._clients.get(id);
     if (!peers || peers.size === 0 || data.rects.length === 0) return;
 
     const packets = buildFramePackets(data.rects, data.encoding, frameId, data.isFullFrame, maxBytes);
+    const bytes = packets.reduce((n, p) => n + p.length, 0);
 
     const st = this._ensureState(id);
+    const now = Date.now();
+    st.framesSent++;
+    st.bytesSent += bytes;
+    st.lastFrameId = frameId;
+    st.lastSentAt = now;
+    st.sentTimes.push(now);
+    while (st.sentTimes.length && now - st.sentTimes[0] > FPS_WINDOW_MS) st.sentTimes.shift();
+    if (this.isAckMode(id)) st.inflight = { frameId, sentAt: now, bytes };
+
     st.queue.push({ frameId, packets });
     this._drainAsync(id).catch(() => {});
   }
@@ -70,10 +183,45 @@ export class DeviceBroadcaster {
     this._drainAsync(id).catch(() => {});
   }
 
+  public getStats(id: string): DeviceStats | null {
+    const st = this._state.get(id);
+    if (!st) return null;
+    const now = Date.now();
+    let ackClients = 0;
+    for (const ws of this._clients.get(id) ?? []) if (this._ackPeers.has(ws)) ackClients++;
+    const fpsFrames = st.sentTimes.filter(t => now - t <= FPS_WINDOW_MS).length;
+    return {
+      clients: this.getClientCount(id),
+      ackClients,
+      ackMode: ackClients > 0,
+      inflightFrameId: st.inflight?.frameId ?? null,
+      inflightAgeMs: st.inflight ? now - st.inflight.sentAt : null,
+      framesSent: st.framesSent,
+      bytesSent: st.bytesSent,
+      ackTimeouts: st.ackTimeouts,
+      acksReceived: st.acksReceived,
+      lastAckLatencyMs: st.lastAckLatencyMs ?? null,
+      avgAckLatencyMs: st.acksReceived ? Math.round(st.ackLatencySum / st.acksReceived) : null,
+      fps: Math.round((fpsFrames / (FPS_WINDOW_MS / 1000)) * 10) / 10,
+      lastFrameId: st.lastFrameId ?? null,
+      lastSentAgeMs: st.lastSentAt ? now - st.lastSentAt : null,
+    };
+  }
+
+  private _fireReady(st: BroadcasterState): void {
+    if (!st.readyCallbacks.length) return;
+    const cbs = st.readyCallbacks;
+    st.readyCallbacks = [];
+    for (const cb of cbs) { try { cb(); } catch {} }
+  }
+
   private _ensureState(id: string): BroadcasterState {
     let st = this._state.get(id);
     if (!st) {
-      st = { queue: [], sending: false };
+      st = {
+        queue: [], sending: false, readyCallbacks: [],
+        framesSent: 0, bytesSent: 0, ackTimeouts: 0, acksReceived: 0, ackLatencySum: 0, sentTimes: [],
+      };
       this._state.set(id, st);
     }
     return st;
@@ -87,10 +235,13 @@ export class DeviceBroadcaster {
     try {
       const peers = this._clients.get(id);
       if (!peers || peers.size === 0) { st.queue.length = 0; return; }
+      const ackMode = this.isAckMode(id);
 
       while (st.queue.length) {
-        // Always keep only the latest frame — drop stale ones
-        if (st.queue.length > 1) {
+        // Legacy clients: keep only the latest frame. In ack mode the
+        // producer is gated upstream (canSend), so the queue never piles up
+        // and nothing is dropped here.
+        if (!ackMode && st.queue.length > 1) {
           const latest = st.queue[st.queue.length - 1];
           st.queue.length = 0;
           st.queue.push(latest);
@@ -100,8 +251,7 @@ export class DeviceBroadcaster {
         let aborted = false;
 
         for (const pkt of f.packets) {
-          // If a newer frame arrived while we're sending, abandon this frame
-          if (st.queue.length > 0) { aborted = true; break; }
+          if (!ackMode && st.queue.length > 0) { aborted = true; break; }
 
           for (const ws of new Set(peers)) {
             if (ws.readyState !== WebSocket.OPEN) {
@@ -123,17 +273,7 @@ export class DeviceBroadcaster {
 
         if (peers.size === 0) { st.queue.length = 0; return; }
 
-        // --- Rate limiting: prevent TCP buffer bloat ---
-        // The server produces frames at ~48fps during animation, but ESP32
-        // WiFi can only consume ~1-2MB/s. Without pacing, hundreds of frames
-        // pile up in the kernel TCP buffer. Content changes (product scan)
-        // get buried behind the backlog, causing ~40s display latency.
-        //
-        // Fix: wait MIN_FRAME_GAP_MS + buffer drain between frames.
-        // During the wait, new frames accumulate in the queue and get
-        // pruned to keep only the latest. The first frame after a quiet
-        // period (content change) is sent immediately (no pacing).
-        if (!aborted) {
+        if (!ackMode && !aborted) {
           await this._paceBeforeNextFrame(peers, st);
         }
       }
@@ -146,19 +286,17 @@ export class DeviceBroadcaster {
     peers: Set<WebSocket>,
     st: BroadcasterState,
   ): Promise<void> {
-    // Minimum inter-frame gap
     await new Promise(r => setTimeout(r, MIN_FRAME_GAP_MS));
 
-    // Then wait for client buffers to drain (adapts to network speed)
     const deadline = Date.now() + DRAIN_MAX_MS;
     while (Date.now() < deadline) {
-      if (st.queue.length > 0) return; // newer frame waiting, go send it
+      if (st.queue.length > 0) return;
       let maxBuf = 0;
       for (const ws of peers) {
         if (ws.readyState === WebSocket.OPEN)
           maxBuf = Math.max(maxBuf, ws.bufferedAmount);
       }
-      if (maxBuf <= BACKPRESSURE_LOW) return; // buffers drained
+      if (maxBuf <= BACKPRESSURE_LOW) return;
       await new Promise(r => setTimeout(r, DRAIN_POLL_MS));
     }
   }

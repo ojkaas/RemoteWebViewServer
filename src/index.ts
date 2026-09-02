@@ -2,11 +2,12 @@ import http from 'http';
 import WebSocket, { WebSocketServer } from "ws"
 import env from "env-var";
 import { makeConfigFromParams, setConfigFor, logDeviceConfig } from "./config.js";
-import { broadcaster, ensureDeviceAsync, cleanupIdleAsync } from './deviceManager.js';
+import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
-import { MsgType } from './protocol.js';
+import { MsgType, parseFrameAckPacket } from './protocol.js';
 
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.5";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one
@@ -16,7 +17,27 @@ const WS_HEARTBEAT_MS = env.get("WS_HEARTBEAT_MS").default("15000").asIntPositiv
 
 type AliveWebSocket = WebSocket & { isAlive?: boolean };
 
-const wss = new WebSocketServer({ port: WS_PORT, perMessageDeflate: false });
+const startedAt = Date.now();
+
+// Plain HTTP on the WebSocket port: GET /stats (JSON) for closed-loop
+// testing and monitoring, everything else is a WebSocket upgrade.
+const wsHttp = http.createServer((req, res) => {
+  const path = (req.url || '/').split('?')[0];
+  if (req.method === 'GET' && (path === '/stats' || path === '/stats/')) {
+    const body = JSON.stringify({
+      version: SERVER_VERSION,
+      uptimeMs: Date.now() - startedAt,
+      wsClients: wss.clients.size,
+      devices: getDevicesSnapshot(),
+    }, null, 2);
+    res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });
+    res.end(body);
+    return;
+  }
+  res.writeHead(426, { 'content-type': 'text/plain' });
+  res.end('WebSocket endpoint; GET /stats for status');
+});
+const wss = new WebSocketServer({ server: wsHttp, perMessageDeflate: false });
 const inputRouter = new InputRouter();
 
 await bootstrapAsync();
@@ -24,6 +45,7 @@ await bootstrapAsync();
 wss.on("connection", async (ws: AliveWebSocket, req) => {
   const url = new URL(req.url || "", `ws://localhost:${WS_PORT}`);
   const id = url.searchParams.get("id") || "default";
+  const ackFlowControl = url.searchParams.get("ack") === "1";
 
   ws.isAlive = true;
   ws.on("pong", () => { ws.isAlive = true; });
@@ -41,7 +63,7 @@ wss.on("connection", async (ws: AliveWebSocket, req) => {
     setConfigFor(id, cfg);
     logDeviceConfig(id, cfg);
 
-    broadcaster.addClient(id, ws);
+    broadcaster.addClient(id, ws, { ack: ackFlowControl });
     dev = await ensureDeviceAsync(id, cfg);
   } catch (e) {
     console.error(`[server] setup failed for ${id}, closing connection: ${(e as Error).message}`);
@@ -64,6 +86,11 @@ wss.on("connection", async (ws: AliveWebSocket, req) => {
       case MsgType.Keepalive:
         device.lastActive = Date.now();
         break;
+      case MsgType.FrameAck: {
+        const fid = parseFrameAckPacket(buf);
+        if (fid !== null) broadcaster.handleFrameAck(id, fid);
+        break;
+      }
       case MsgType.FrameStats:
         inputRouter.handleFrameStatsPacketAsync(device, buf).catch(() => console.warn(`Failed to handle Self test packet`));
         break;
@@ -108,4 +135,4 @@ http.createServer(async (_req, res) => {
 
 setInterval(() => cleanupIdleAsync(), 60_000);
 
-console.log(`[server] WebSocket listening on :${WS_PORT}`);
+wsHttp.listen(WS_PORT, () => console.log(`[server] WebSocket listening on :${WS_PORT} (GET /stats for status)`));

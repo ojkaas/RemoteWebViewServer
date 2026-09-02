@@ -31,7 +31,18 @@ This fork fixes display latency issues that occur when the server produces frame
 - **Early message buffering** — the ESP sends `OpenURL` right after the WebSocket handshake, while the server is still creating the Chromium target. Those messages were silently dropped (the device stayed on `about:blank`); they are now buffered and replayed once the device is ready.
 - **WebSocket heartbeat** — the server pings every peer every `WS_HEARTBEAT_MS` (default 15000) and terminates peers that do not answer, so dead sockets no longer accumulate. The ESP client answers pings automatically.
 - **Forced refresh** — `OpenURL` flag `0x0001` reloads the page even when the URL is unchanged and guarantees the next frame is a full frame (client: `remote_webview.refresh` action).
+- **Ack-based flow control (1.1.5)** — clients that connect with `ack=1` send a `FrameAck` after each frame is on the glass; the server keeps exactly one frame in flight and encodes only the newest screenshot once the ack arrives (3 s timeout writes a frame off). Latency is bounded to one frame on any link, the fixed 100 ms pacing gap is gone for such clients, and no partial frame is ever dropped, so tile diffs stay consistent. Legacy clients keep the old timer-based pacing.
+- **`GET /stats` on the WebSocket port (1.1.5)** — JSON with per-device connection count, ack mode, frames/bytes sent, fps, ack latency, timeouts, screencast and processing counters. `tools/loop_test.py` uses it for a closed-loop test: it kicks the device by connecting with its id and verifies that the device reconnects, receives the forced full frame and acks it.
 - **Broken CDP session recovery** — if the existing Chromium session errors on reconnect, the device is recreated instead of failing the connection.
+
+## Closed-loop test
+
+```bash
+python tools/loop_test.py --server 192.168.178.62:8081 --device esp32-80f1b2d0b18b
+python tools/loop_test.py --server 192.168.178.62:8081 --watch   # live stats every 2 s
+```
+
+`GET http://server:8081/stats` returns the same data as JSON.
 
 ## Features
 

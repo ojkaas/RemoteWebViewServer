@@ -16,6 +16,10 @@
 // Keepalive message:
 //   [type u8=5][ver u8=1]
 //
+// FrameAck message (client -> server, sent once the last packet of a frame
+// has been decoded and drawn):
+//   [type u8=9][ver u8=1][frame_id u32]
+//
 
 export const PROTOCOL_VERSION = 1 as const;
 
@@ -26,6 +30,8 @@ export enum MsgType {
   FrameStats  = 3,
   OpenURL     = 4,
   Keepalive   = 5,
+  // 6..8 are reserved for upstream/micoli extensions (CurrentURL, DeviceList, KillDevice)
+  FrameAck    = 9,
 }
 
 export enum Encoding {
@@ -78,6 +84,7 @@ export const TILE_HEADER_BYTES  = 2 + 2 + 2 + 2 + 4;      // 12
 export const TOUCH_BYTES        = 1 + 1 + 1 + 1 + 2 + 2;  // 8
 export const FRAME_STATS_BYTES  = 1 + 1 + 4 + 4;          // 10
 export const OPENURL_HEADER_BYTES = 1 + 1 + 2 + 4;        // 8
+export const FRAME_ACK_BYTES    = 1 + 1 + 4;              // 6
 
 const clampU16 = (v: number) => (v < 0 ? 0 : v > 0xffff ? 0xffff : v|0);
 
@@ -127,6 +134,21 @@ export function parseOpenURLPacket(buf: Buffer): { flags: number; url: string } 
   const url = buf.subarray(OPENURL_HEADER_BYTES, OPENURL_HEADER_BYTES + len).toString("utf8");
   
   return { flags, url };
+}
+
+export function buildFrameAckPacket(frameId: number): Buffer {
+  const b = Buffer.alloc(FRAME_ACK_BYTES);
+  b.writeUInt8(MsgType.FrameAck, 0);
+  b.writeUInt8(PROTOCOL_VERSION, 1);
+  b.writeUInt32LE(frameId >>> 0, 2);
+  return b;
+}
+
+export function parseFrameAckPacket(buf: Buffer): number | null {
+  if (!Buffer.isBuffer(buf) || buf.length < FRAME_ACK_BYTES) return null;
+  if (buf.readUInt8(0) !== MsgType.FrameAck) return null;
+  if (buf.readUInt8(1) !== PROTOCOL_VERSION) return null;
+  return buf.readUInt32LE(2);
 }
 
 export function buildFrameStatsPacket(): Buffer {

@@ -10,6 +10,9 @@ import {
   parseOpenURLPacket,
   buildFramePackets,
   parseFrameHeader,
+  buildFrameAckPacket,
+  parseFrameAckPacket,
+  FRAME_ACK_BYTES,
 } from "./protocol.js";
 
 function buildOpenURL(url: string, flags: number): Buffer {
@@ -37,6 +40,18 @@ describe("OpenURL packet", () => {
   it("rejects truncated packets", () => {
     const b = buildOpenURL("http://x/a", 0).subarray(0, 10);
     expect(parseOpenURLPacket(b)).toBeNull();
+  });
+});
+
+describe("FrameAck packet", () => {
+  it("round-trips the frame id", () => {
+    const b = buildFrameAckPacket(0xfffffffe);
+    expect(b.length).toBe(FRAME_ACK_BYTES);
+    expect(b.readUInt8(0)).toBe(MsgType.FrameAck);
+    expect(parseFrameAckPacket(b)).toBe(0xfffffffe);
+  });
+  it("rejects other packet types", () => {
+    expect(parseFrameAckPacket(buildOpenURL("x", 0))).toBeNull();
   });
 });
 

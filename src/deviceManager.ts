@@ -26,6 +26,14 @@ export type DeviceSession = {
   mutationCaptureTimer?: NodeJS.Timeout;
   lastProcessedMs?: number;
   processing?: boolean;
+  waitingForAck?: boolean;
+
+  // stats
+  screencastFrames: number;
+  processedFrames: number;
+  skippedUnchanged: number;
+  lastProcessMs?: number;
+  createdAt: number;
 
   /**
    * Take a screenshot of the current page and push it as a full frame.
@@ -160,13 +168,16 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     mutationCaptureTimer: undefined,
     lastProcessedMs: undefined,
     processing: false,
+    waitingForAck: false,
+    screencastFrames: 0,
+    processedFrames: 0,
+    skippedUnchanged: 0,
+    lastProcessMs: undefined,
+    createdAt: Date.now(),
     captureAndPush: async () => { },
   };
   devices.set(id, newDevice);
   newDevice.processor.requestFullFrame();
-
-  let _scFrameCount = 0;
-  let _lastScLog = 0;
 
   const flushPending = async () => {
     const dev = newDevice;
@@ -181,9 +192,24 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       return;
     }
 
+    if (!dev.pendingB64) return;
+
+    // Ack-based flow control: while the client still has a frame in flight,
+    // keep the newest screenshot and wait. The tile diff is then computed
+    // against the last frame actually sent, so nothing is ever skipped.
+    if (!broadcaster.canSend(id)) {
+      if (!dev.waitingForAck) {
+        dev.waitingForAck = true;
+        broadcaster.onReady(id, () => {
+          dev.waitingForAck = false;
+          if (dev.pendingB64 && !dev.throttleTimer) dev.throttleTimer = setTimeout(flushPending, 0);
+        });
+      }
+      return;
+    }
+
     const b64 = dev.pendingB64;
     dev.pendingB64 = undefined;
-    if (!b64) return;
 
     dev.processing = true;
     const t0 = Date.now();
@@ -192,7 +218,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
       const h32 = hash32(pngFull);
       if (dev.prevFrameHash === h32) {
-        console.log(`[diag:${id}] flushPending: hash unchanged, skipping (${pngFull.length}B)`);
+        dev.skippedUnchanged++;
         dev.lastProcessedMs = Date.now();
         return;
       }
@@ -207,12 +233,11 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         .toBuffer({ resolveWithObject: true });
       const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
       const elapsed = Date.now() - t0;
+      dev.lastProcessMs = elapsed;
+      dev.processedFrames++;
       if (out.rects.length > 0) {
         dev.frameId = (dev.frameId + 1) >>> 0;
-        console.log(`[diag:${id}] flushPending: processed fid=${dev.frameId} rects=${out.rects.length} full=${out.isFullFrame} ${elapsed}ms`);
         broadcaster.sendFrameChunked(id, out, dev.frameId, cfg.maxBytesPerMessage);
-      } else {
-        console.log(`[diag:${id}] flushPending: 0 rects (no change) ${elapsed}ms`);
       }
     } catch (e) {
       console.warn(`[device] Failed to process frame for ${id}: ${(e as Error).message}`);
@@ -287,13 +312,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     // Reset fallback timer — screencast is active, no fallback needed
     scheduleFallback();
 
-    _scFrameCount++;
+    newDevice.screencastFrames++;
     const now = Date.now();
-    // Log every screencast frame received, but throttle to 1/sec during bursts
-    if (now - _lastScLog > 1000 || _scFrameCount <= 5) {
-      console.log(`[diag:${id}] screencastFrame #${_scFrameCount} ts=${evt.metadata?.timestamp?.toFixed(3) ?? '?'} dataLen=${evt.data?.length ?? 0}`);
-      _lastScLog = now;
-    }
 
     if (broadcaster.getClientCount(newDevice.deviceId) === 0)
       return;
@@ -327,6 +347,29 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   });
 
   return newDevice;
+}
+
+export function getDevicesSnapshot() {
+  const now = Date.now();
+  return Array.from(devices.values()).map(d => ({
+    id: d.deviceId,
+    url: d.url,
+    width: d.cfg.width,
+    height: d.cfg.height,
+    tileSize: d.cfg.tileSize,
+    jpegQuality: d.cfg.jpegQuality,
+    minFrameInterval: d.cfg.minFrameInterval,
+    ageMs: now - d.createdAt,
+    lastActiveAgeMs: now - d.lastActive,
+    frameId: d.frameId,
+    screencastFrames: d.screencastFrames,
+    processedFrames: d.processedFrames,
+    skippedUnchanged: d.skippedUnchanged,
+    lastProcessMs: d.lastProcessMs ?? null,
+    waitingForAck: !!d.waitingForAck,
+    pendingFrame: !!d.pendingB64,
+    transport: broadcaster.getStats(d.deviceId),
+  }));
 }
 
 export async function cleanupIdleAsync(ttlMs = 5 * 60_000) {
