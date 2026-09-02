@@ -9,6 +9,16 @@ const USER_DATA_DIR = process.env.USER_DATA_DIR || (process.platform === 'win32'
   ? 'C:\\Temp\\remotewebview-profile'
   : '/var/temp/remotewebview-profile');
 const BROWSER_LOCALE = env.get("BROWSER_LOCALE").default("en-US").asString();
+// Extra Chromium switches, space separated, e.g. "--disable-gpu-compositing".
+// CHROME_ARGS_PRESET selects a built-in set so a variant can be shipped as an
+// image without touching the compose file: default | swcompositing | nogpu
+const CHROME_EXTRA_ARGS = (env.get("CHROME_EXTRA_ARGS").default("").asString()).split(/\s+/).filter(Boolean);
+const CHROME_ARGS_PRESET = env.get("CHROME_ARGS_PRESET").default(process.env.CHROME_ARGS_PRESET_BUILD ?? "default").asString();
+const PRESETS: Record<string, string[]> = {
+  default: [],
+  swcompositing: ['--disable-gpu-compositing'],
+  nogpu: ['--disable-gpu', '--disable-gpu-compositing'],
+};
 
 async function fetchJsonVersionAsync(): Promise<{ webSocketDebuggerUrl: string } | null> {
   try {
@@ -31,7 +41,10 @@ async function startHeadlessIfNeededAsync(): Promise<void> {
     '--force-device-scale-factor=1',
     '--headless=new',
     ...(PREFERS_REDUCED_MOTION ? ['--force-prefers-reduced-motion'] : []),
+    ...(PRESETS[CHROME_ARGS_PRESET] ?? []),
+    ...CHROME_EXTRA_ARGS,
   ];
+  console.log(`[browser] chromium args preset=${CHROME_ARGS_PRESET} extra=${JSON.stringify(CHROME_EXTRA_ARGS)}`);
 
   if (PREFERS_REDUCED_MOTION)
     console.log('[browser] Launching with prefers-reduced-motion');

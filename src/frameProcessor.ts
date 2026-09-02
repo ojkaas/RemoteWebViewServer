@@ -2,6 +2,7 @@ import os from "node:os";
 import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
 import { hash32 } from "./util.js";
+import { Q5, Q6 } from "./deviceManager.js";
 
 sharp.concurrency(Math.max(1, os.cpus().length - 1));
 
@@ -25,6 +26,7 @@ export type FrameProcessorCfg = {
   fullFrameEvery: number;
   maxBytesPerMessage: number;
   chroma?: '4:4:4' | '4:2:0';
+  quantize565?: boolean;   // hash on RGB565-quantised values so sub-step changes are ignored
 };
 
 export class FrameProcessor {
@@ -296,6 +298,19 @@ export class FrameProcessor {
     const stride = rgba.width * 4;
     let hsh = 0x811C9DC5 >>> 0;
     const rowBytes = w * 4;
+    if (this._cfg.quantize565) {
+      // Every 4th pixel, all three channels, quantised to what the panel shows.
+      for (let yy = 0; yy < h; yy++) {
+        const base = (y + yy) * stride + x * 4;
+        const end = base + rowBytes;
+        for (let i = base; i < end; i += 16) {
+          hsh ^= Q5[d[i]]; hsh = (hsh * 0x01000193) >>> 0;
+          hsh ^= Q6[d[i + 1]]; hsh = (hsh * 0x01000193) >>> 0;
+          hsh ^= Q5[d[i + 2]]; hsh = (hsh * 0x01000193) >>> 0;
+        }
+      }
+      return hsh >>> 0;
+    }
     for (let yy = 0; yy < h; yy++) {
       const base = (y + yy) * stride + x * 4;
       const end = base + rowBytes;

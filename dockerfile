@@ -16,6 +16,8 @@ RUN npm prune --omit=dev
 
 FROM mcr.microsoft.com/playwright:v1.55.0-jammy AS runner
 WORKDIR /app
+ARG CHROME_ARGS_PRESET_BUILD=default
+ENV CHROME_ARGS_PRESET_BUILD=$CHROME_ARGS_PRESET_BUILD
 ENV NODE_ENV=production \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

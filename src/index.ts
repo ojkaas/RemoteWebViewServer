@@ -2,12 +2,12 @@ import http from 'http';
 import WebSocket, { WebSocketServer } from "ws"
 import env from "env-var";
 import { makeConfigFromParams, setConfigFor, logDeviceConfig } from "./config.js";
-import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot } from './deviceManager.js';
+import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot, captureDevicePngAsync } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
-const SERVER_VERSION = process.env.npm_package_version ?? "1.1.13";
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.18";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one
@@ -23,11 +23,24 @@ const startedAt = Date.now();
 // testing and monitoring, everything else is a WebSocket upgrade.
 const wsHttp = http.createServer((req, res) => {
   const path = (req.url || '/').split('?')[0];
+  if (req.method === 'GET' && path === '/screenshot') {
+    // GET /screenshot?id=<device id> -> PNG of the page as Chromium renders it
+    const id = new URL(req.url || '/', 'http://x').searchParams.get('id') || getDevicesSnapshot()[0]?.id;
+    if (!id) { res.writeHead(404); res.end('no device'); return; }
+    captureDevicePngAsync(id).then(png => {
+      if (!png) { res.writeHead(404); res.end('unknown device'); return; }
+      res.writeHead(200, { 'content-type': 'image/png', 'cache-control': 'no-store' });
+      res.end(png);
+    }).catch(e => { res.writeHead(500); res.end(String((e as Error).message)); });
+    return;
+  }
   if (req.method === 'GET' && (path === '/stats' || path === '/stats/')) {
     const body = JSON.stringify({
       version: SERVER_VERSION,
       uptimeMs: Date.now() - startedAt,
       wsClients: wss.clients.size,
+      chromeArgsPreset: process.env.CHROME_ARGS_PRESET ?? process.env.CHROME_ARGS_PRESET_BUILD ?? 'default',
+      quantize565: !/^(0|false|no|off)$/i.test(process.env.QUANTIZE_565 ?? '1'),
       devices: getDevicesSnapshot(),
     }, null, 2);
     res.writeHead(200, { 'content-type': 'application/json', 'cache-control': 'no-store' });

@@ -67,7 +67,8 @@ def main() -> int:
     cpu = None
     if args.cpu_host:
         # two top samples args.seconds apart; the second one reflects the window
-        cmd = f"top -bn2 -d {args.seconds} -w 200 | awk '/^top/{{n++}} n==2 && /(chrome|node|headless)/{{c[$12]+=$9}} END{{for(k in c) printf \"%s=%.0f \", k, c[k]}}'"
+        cmd = (f"top -bn2 -d {args.seconds} -w 200 | awk '/^top/{{n++}} n==2 && /(chrome|node|headless)/{{c[$12]+=$9}} END{{for(k in c) printf \"%s=%.0f \", k, c[k]}}'; "
+               f"printf 'load=%s' \"$(cut -d' ' -f1 /proc/loadavg)\"")
         try:
             cpu = subprocess.run(["ssh", "-o", "BatchMode=yes", args.cpu_host, cmd], capture_output=True, text=True, timeout=args.seconds + 30).stdout.strip()
         except Exception as e:

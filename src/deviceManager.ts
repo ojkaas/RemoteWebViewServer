@@ -60,6 +60,18 @@ const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_RED
 // smaller and faster at the cost of a second lossy step before our tiles.
 // (defaults come from env via config.ts; per-device overrides via URL params scf/scq/chroma)
 
+// The panels are RGB565. Quantising the captured frame to what the panel can
+// show BEFORE hashing means sub-step changes (e.g. the dark fringe of an
+// animated glow) are not re-sent at all, and the JPEG encoder does not spend
+// bits on detail that would be thrown away anyway. Round-to-nearest tables.
+const Q5 = new Uint8Array(256), Q6 = new Uint8Array(256);
+for (let v = 0; v < 256; v++) {
+  Q5[v] = Math.min(31, Math.round(v * 31 / 255)) * 255 / 31 | 0;
+  Q6[v] = Math.min(63, Math.round(v * 63 / 255)) * 255 / 63 | 0;
+}
+export const QUANTIZE_565 = !/^(0|false|no|off)$/i.test(process.env.QUANTIZE_565 ?? '1');
+export { Q5, Q6 };
+
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
@@ -167,6 +179,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     fullFrameEvery: cfg.fullFrameEvery,
     maxBytesPerMessage: cfg.maxBytesPerMessage,
     chroma: cfg.chroma,
+    quantize565: QUANTIZE_565,
   });
 
   const newDevice: DeviceSession = {
@@ -416,6 +429,14 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   });
 
   return newDevice;
+}
+
+/** PNG screenshot of what the device's page currently shows (for visual checks). */
+export async function captureDevicePngAsync(id: string): Promise<Buffer | null> {
+  const dev = devices.get(id);
+  if (!dev) return null;
+  const result: any = await dev.cdp.send('Page.captureScreenshot', { format: 'png' });
+  return result?.data ? Buffer.from(result.data, 'base64') : null;
 }
 
 export function getDevicesSnapshot() {
