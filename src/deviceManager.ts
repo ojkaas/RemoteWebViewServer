@@ -41,7 +41,7 @@ export type DeviceSession = {
   processedFrames: number;
   skippedUnchanged: number;
   lastProcessMs?: number;
-  timing: { decodeMs: number; diffEncodeMs: number; captureWaitMs: number; n: number };
+  timing: { decodeMs: number; diffEncodeMs: number; hashMs: number; encodeMs: number; rects: number; captureWaitMs: number; n: number };
   lastCaptureAt?: number;
   createdAt: number;
 
@@ -123,7 +123,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     deviceScaleFactor: 1,
     mobile: true
   });
-  if (PREFERS_REDUCED_MOTION) {
+  if (cfg.reducedMotion || PREFERS_REDUCED_MOTION) {
     await session.send('Emulation.setEmulatedMedia', {
       media: 'screen',
       features: [{ name: 'prefers-reduced-motion', value: 'reduce' }],
@@ -191,7 +191,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     processedFrames: 0,
     skippedUnchanged: 0,
     lastProcessMs: undefined,
-    timing: { decodeMs: 0, diffEncodeMs: 0, captureWaitMs: 0, n: 0 },
+    timing: { decodeMs: 0, diffEncodeMs: 0, hashMs: 0, encodeMs: 0, rects: 0, captureWaitMs: 0, n: 0 },
     lastCaptureAt: undefined,
     createdAt: Date.now(),
     pendingScreencastSessions: [],
@@ -263,6 +263,9 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       const elapsed = Date.now() - t0;
       dev.timing.decodeMs += t1 - t0;
       dev.timing.diffEncodeMs += Date.now() - t1;
+      dev.timing.hashMs += out.hashMs ?? 0;
+      dev.timing.encodeMs += out.encodeMs ?? 0;
+      dev.timing.rects += out.rects.length;
       if (dev.lastCaptureAt) dev.timing.captureWaitMs += t0 - dev.lastCaptureAt;
       dev.timing.n++;
       dev.lastProcessMs = elapsed;
@@ -436,9 +439,13 @@ export function getDevicesSnapshot() {
     lastProcessMs: d.lastProcessMs ?? null,
     avgDecodeMs: d.timing.n ? Math.round(d.timing.decodeMs / d.timing.n * 10) / 10 : null,
     avgDiffEncodeMs: d.timing.n ? Math.round(d.timing.diffEncodeMs / d.timing.n * 10) / 10 : null,
+    avgHashMs: d.timing.n ? Math.round(d.timing.hashMs / d.timing.n * 10) / 10 : null,
+    avgEncodeMs: d.timing.n ? Math.round(d.timing.encodeMs / d.timing.n * 10) / 10 : null,
+    avgRectsPerFrame: d.timing.n ? Math.round(d.timing.rects / d.timing.n * 10) / 10 : null,
     avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,
     screencastFormat: d.cfg.screencastFormat,
     chroma: d.cfg.chroma,
+    reducedMotion: d.cfg.reducedMotion,
     waitingForAck: !!d.waitingForAck,
     pendingFrame: !!d.pendingB64,
     transport: broadcaster.getStats(d.deviceId),

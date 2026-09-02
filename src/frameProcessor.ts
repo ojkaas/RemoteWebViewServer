@@ -13,6 +13,8 @@ export type FrameOut = {
   rects: Rect[];
   isFullFrame: boolean;
   encoding: Encoding;
+  hashMs?: number;     // tile hashing + merge
+  encodeMs?: number;   // JPEG encoding of the rects
 };
 
 export type FrameProcessorCfg = {
@@ -45,6 +47,7 @@ export class FrameProcessor {
   public async processFrameAsync(rgba: RGBA): Promise<FrameOut> {
     if (!this._prev) this._initGrid(rgba.width, rgba.height);
 
+    const tHash0 = Date.now();
     let forceFull = (this._iter % this._cfg.fullFrameEvery) === 0;
     if (this._fullFrameRequested) {
       forceFull = true;
@@ -63,8 +66,7 @@ export class FrameProcessor {
         const w = Math.min(this._cfg.tileSize, rgba.width - x);
         const h = Math.min(this._cfg.tileSize, rgba.height - y);
 
-        const raw = this._extractRaw(rgba, x, y, w, h);
-        const h32 = hash32(raw);
+        const h32 = this._hashTile(rgba, x, y, w, h);
         const idx = ty * this._cols + tx;
         const prev = this._prev![idx];
         const changed = forceFull || (prev !== h32);
@@ -78,12 +80,15 @@ export class FrameProcessor {
     const changedPct = totalArea > 0 ? (changedArea / totalArea) : 0;
     const doFull = forceFull || (changedPct > this._cfg.fullframeAreaThreshold);
 
+    const tEnc0 = Date.now();
     let out: FrameOut;
     if (doFull) {
       out = await this._processFullFrame(rgba, tiles, chosenEncoding);
     } else {
       out = await this._processPartialFrame(rgba, tiles, chosenEncoding);
     }
+    out.hashMs = tEnc0 - tHash0;
+    out.encodeMs = Date.now() - tEnc0;
 
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
     for (let i = 0; i < out.rects.length; i++) {
@@ -281,6 +286,27 @@ export class FrameProcessor {
     this._cols = Math.ceil(w / this._cfg.tileSize);
     this._rows = Math.ceil(h / this._cfg.tileSize);
     this._prev = new Uint32Array(this._cols * this._rows);
+  }
+
+  // FNV-1a over the tile sampled every 4th pixel of every row, straight from
+  // the frame buffer (no copy). Same sensitivity as hash32() on the extracted
+  // tile, which sampled every 16th byte.
+  private _hashTile(rgba: RGBA, x: number, y: number, w: number, h: number): number {
+    const d = rgba.data;
+    const stride = rgba.width * 4;
+    let hsh = 0x811C9DC5 >>> 0;
+    const rowBytes = w * 4;
+    for (let yy = 0; yy < h; yy++) {
+      const base = (y + yy) * stride + x * 4;
+      const end = base + rowBytes;
+      for (let i = base; i < end; i += 16) {
+        hsh ^= d[i]; hsh = (hsh * 0x01000193) >>> 0;
+        hsh ^= d[i + 4] ?? 0; hsh = (hsh * 0x01000193) >>> 0;
+        hsh ^= d[i + 8] ?? 0; hsh = (hsh * 0x01000193) >>> 0;
+        hsh ^= d[i + 12] ?? 0; hsh = (hsh * 0x01000193) >>> 0;
+      }
+    }
+    return hsh >>> 0;
   }
 
   private _extractRaw(rgba: RGBA, x: number, y: number, w: number, h: number): Buffer {

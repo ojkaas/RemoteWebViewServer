@@ -10,6 +10,7 @@ bytes/frame, ack latency for the window, and the server's per-frame timing.
 """
 import argparse
 import json
+import subprocess
 import sys
 import time
 import urllib.request
@@ -30,6 +31,7 @@ def main() -> int:
     ap.add_argument("--wait-version")
     ap.add_argument("--wait-timeout", type=int, default=150)
     ap.add_argument("--label", default="")
+    ap.add_argument("--cpu-host", help="ssh host to sample chrome/node CPU with top during the window")
     args = ap.parse_args()
 
     def dev():
@@ -62,7 +64,16 @@ def main() -> int:
         time.sleep(args.settle)
 
     a, _ = dev()
-    time.sleep(args.seconds)
+    cpu = None
+    if args.cpu_host:
+        # two top samples args.seconds apart; the second one reflects the window
+        cmd = f"top -bn2 -d {args.seconds} -w 200 | awk '/^top/{{n++}} n==2 && /(chrome|node|headless)/{{c[$12]+=$9}} END{{for(k in c) printf \"%s=%.0f \", k, c[k]}}'"
+        try:
+            cpu = subprocess.run(["ssh", "-o", "BatchMode=yes", args.cpu_host, cmd], capture_output=True, text=True, timeout=args.seconds + 30).stdout.strip()
+        except Exception as e:
+            cpu = f"cpu-sample-failed:{e}"
+    else:
+        time.sleep(args.seconds)
     b, s = dev()
     ta, tb = a["transport"], b["transport"]
     n = tb["acksReceived"] - ta["acksReceived"]
@@ -70,8 +81,9 @@ def main() -> int:
     avg_ack = (tb["avgAckLatencyMs"] * tb["acksReceived"] - ta["avgAckLatencyMs"] * ta["acksReceived"]) / n if n else float("nan")
     print(f"{args.label or 'sample'} [{s.get('version')} tile={b['tileSize']} q={b['jpegQuality']} chroma={b.get('chroma')} sc={b.get('screencastFormat')}] "
           f"{args.seconds}s: fps={nf / args.seconds:.1f} bytes/frame={(tb['bytesSent'] - ta['bytesSent']) // nf} "
-          f"avgAck={avg_ack:.0f}ms decode={b.get('avgDecodeMs')}ms diffEncode={b.get('avgDiffEncodeMs')}ms "
-          f"captures={b['screencastFrames'] - a['screencastFrames']} timeouts={tb['ackTimeouts'] - ta['ackTimeouts']}")
+          f"avgAck={avg_ack:.0f}ms decode={b.get('avgDecodeMs')}ms diffEncode={b.get('avgDiffEncodeMs')}ms (hash={b.get('avgHashMs')} enc={b.get('avgEncodeMs')} rects={b.get('avgRectsPerFrame')}) "
+          f"captures={b['screencastFrames'] - a['screencastFrames']} timeouts={tb['ackTimeouts'] - ta['ackTimeouts']}"
+          + (f" cpu%[{cpu}]" if cpu is not None else ""))
     return 0
 
 
