@@ -41,6 +41,8 @@ export type DeviceSession = {
   processedFrames: number;
   skippedUnchanged: number;
   lastProcessMs?: number;
+  timing: { decodeMs: number; diffEncodeMs: number; captureWaitMs: number; n: number };
+  lastCaptureAt?: number;
   createdAt: number;
 
   /**
@@ -53,6 +55,10 @@ export type DeviceSession = {
 };
 
 const PREFERS_REDUCED_MOTION = /^(1|true|yes|on)$/i.test(process.env.PREFERS_REDUCED_MOTION ?? '');
+// Screencast capture format. PNG is lossless but Chrome encodes it slowly and
+// ships ~1 MB base64 per 1024x600 frame over CDP; JPEG is several times
+// smaller and faster at the cost of a second lossy step before our tiles.
+// (defaults come from env via config.ts; per-device overrides via URL params scf/scq/chroma)
 
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
@@ -60,7 +66,8 @@ export const broadcaster = new DeviceBroadcaster();
 
 function screencastParams(cfg: DeviceConfig) {
   return {
-    format: 'png' as const,
+    format: cfg.screencastFormat,
+    ...(cfg.screencastFormat === 'jpeg' ? { quality: cfg.screencastQuality } : {}),
     maxWidth: cfg.width,
     maxHeight: cfg.height,
     everyNthFrame: cfg.everyNthFrame,
@@ -159,6 +166,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     jpegQuality: cfg.jpegQuality,
     fullFrameEvery: cfg.fullFrameEvery,
     maxBytesPerMessage: cfg.maxBytesPerMessage,
+    chroma: cfg.chroma,
   });
 
   const newDevice: DeviceSession = {
@@ -183,6 +191,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     processedFrames: 0,
     skippedUnchanged: 0,
     lastProcessMs: undefined,
+    timing: { decodeMs: 0, diffEncodeMs: 0, captureWaitMs: 0, n: 0 },
+    lastCaptureAt: undefined,
     createdAt: Date.now(),
     pendingScreencastSessions: [],
     screencastPaused: false,
@@ -248,8 +258,13 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         .ensureAlpha()
         .raw()
         .toBuffer({ resolveWithObject: true });
+      const t1 = Date.now();
       const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
       const elapsed = Date.now() - t0;
+      dev.timing.decodeMs += t1 - t0;
+      dev.timing.diffEncodeMs += Date.now() - t1;
+      if (dev.lastCaptureAt) dev.timing.captureWaitMs += t0 - dev.lastCaptureAt;
+      dev.timing.n++;
       dev.lastProcessMs = elapsed;
       dev.processedFrames++;
       if (out.rects.length > 0) {
@@ -368,6 +383,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     ackScreencast(evt.sessionId);
 
     newDevice.lastActive = Date.now();
+    newDevice.lastCaptureAt = Date.now();
     newDevice.pendingB64 = evt.data;
 
     const since = newDevice.lastProcessedMs ? (now - newDevice.lastProcessedMs) : Infinity;
@@ -418,6 +434,11 @@ export function getDevicesSnapshot() {
     processedFrames: d.processedFrames,
     skippedUnchanged: d.skippedUnchanged,
     lastProcessMs: d.lastProcessMs ?? null,
+    avgDecodeMs: d.timing.n ? Math.round(d.timing.decodeMs / d.timing.n * 10) / 10 : null,
+    avgDiffEncodeMs: d.timing.n ? Math.round(d.timing.diffEncodeMs / d.timing.n * 10) / 10 : null,
+    avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,
+    screencastFormat: d.cfg.screencastFormat,
+    chroma: d.cfg.chroma,
     waitingForAck: !!d.waitingForAck,
     pendingFrame: !!d.pendingB64,
     transport: broadcaster.getStats(d.deviceId),

@@ -33,7 +33,7 @@ def fmt(d: dict) -> str:
     t = d.get("transport") or {}
     return (f"clients={t.get('clients')} ack={int(bool(t.get('ackMode')))} "
             f"fps={t.get('fps')} sent={t.get('framesSent')} acks={t.get('acksReceived')} "
-            f"ackLat={t.get('lastAckLatencyMs')}ms avgAck={t.get('avgAckLatencyMs')}ms "
+            f"ackLat={t.get('lastAckLatencyMs')}ms avgAck={t.get('avgAckLatencyMs')}ms flush={t.get('avgFlushMs')}ms "
             f"timeouts={t.get('ackTimeouts')} inflight={t.get('inflightCount')}/{t.get('maxInflight')} fid={d.get('frameId')} "
             f"proc={d.get('lastProcessMs')}ms sc={d.get('screencastFrames')} "
             f"skip={d.get('skippedUnchanged')} url={d.get('url')}")

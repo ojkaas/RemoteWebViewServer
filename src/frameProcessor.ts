@@ -22,6 +22,7 @@ export type FrameProcessorCfg = {
   jpegQuality: number;
   fullFrameEvery: number;
   maxBytesPerMessage: number;
+  chroma?: '4:4:4' | '4:2:0';
 };
 
 export class FrameProcessor {
@@ -304,7 +305,7 @@ export class FrameProcessor {
 
   private async _encodeJPEG(rawRgba: Buffer, w: number, h: number): Promise<Buffer> {
     return sharp(rawRgba, { raw: { width: w, height: h, channels: 4 } })
-      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: "4:4:4" })
+      .jpeg({ quality: this._cfg.jpegQuality, mozjpeg: false, chromaSubsampling: this._cfg.chroma ?? "4:4:4" })
       .toBuffer();
   }
 

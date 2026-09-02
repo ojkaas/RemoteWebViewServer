@@ -13,6 +13,9 @@ export type DeviceConfig = {
   jpegQuality: number;              // 1..100
   maxBytesPerMessage: number;       // bytes (>0)
   rotation: Rotation;               // degrees
+  chroma: '4:4:4' | '4:2:0';        // JPEG chroma subsampling for tiles
+  screencastFormat: 'png' | 'jpeg';  // Chrome capture format
+  screencastQuality: number;        // 1..100, jpeg only
 };
 
 const DEFAULTS = {
@@ -25,6 +28,9 @@ const DEFAULTS = {
   jpegQuality: 85,
   maxBytesPerMessage: 14336,
   rotation: 0,
+  chroma: '4:4:4',
+  screencastFormat: 'png',
+  screencastQuality: 90,
 } as const;
 
 const store = new Map<string, DeviceConfig>();
@@ -108,6 +114,11 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const maxBytesPerMessage = intPos(params.get("mbpm")) ?? envFallbacks.maxBytesPerMessage ?? DEFAULTS.maxBytesPerMessage;
   const rotation = intNonNeg(params.get("r")) as 0 | 90 | 180 | 270 | undefined
     ?? DEFAULTS.rotation;
+  const chromaRaw = params.get("chroma") ?? env.get("JPEG_CHROMA").asString();
+  const chroma: '4:4:4' | '4:2:0' = chromaRaw && /^4:?2:?0$/.test(chromaRaw) ? '4:2:0' : (chromaRaw && /^4:?4:?4$/.test(chromaRaw) ? '4:4:4' : DEFAULTS.chroma);
+  const scfRaw = params.get("scf") ?? env.get("SCREENCAST_FORMAT").asString();
+  const screencastFormat: 'png' | 'jpeg' = scfRaw && /^jpe?g$/i.test(scfRaw) ? 'jpeg' : DEFAULTS.screencastFormat;
+  const screencastQuality = clamp(intPos(params.get("scq")) ?? intPos(env.get("SCREENCAST_JPEG_QUALITY").asString()) ?? DEFAULTS.screencastQuality, 1, 100);
 
   const dimensions = getRotatedDimensions(width, height, rotation);
 
@@ -123,6 +134,9 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     jpegQuality,
     maxBytesPerMessage,
     rotation,
+    chroma,
+    screencastFormat,
+    screencastQuality,
   };
 }
 
@@ -142,7 +156,10 @@ export function deviceConfigsEqual(
     a.minFrameInterval === b.minFrameInterval &&
     a.jpegQuality === b.jpegQuality &&
     a.maxBytesPerMessage === b.maxBytesPerMessage &&
-    a.rotation === b.rotation
+    a.rotation === b.rotation &&
+    a.chroma === b.chroma &&
+    a.screencastFormat === b.screencastFormat &&
+    a.screencastQuality === b.screencastQuality
   );
 }
 
@@ -159,6 +176,9 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
     ["jpegQuality", cfg.jpegQuality],
     ["maxBytesPerMessage", cfg.maxBytesPerMessage],
     ["rotation", cfg.rotation],
+    ["chroma", cfg.chroma],
+    ["screencastFormat", cfg.screencastFormat],
+    ["screencastQuality", cfg.screencastQuality],
   ];
 
   const head = `[client_connect] id=${id}`;

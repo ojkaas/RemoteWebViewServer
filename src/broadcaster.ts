@@ -2,7 +2,7 @@ import { WebSocket } from "ws";
 import { buildFrameStatsPacket, buildFramePackets } from "./protocol.js";
 import type { FrameOut } from "./frameProcessor.js";
 
-type OutFrame = { frameId: number; packets: Buffer[] };
+type OutFrame = { frameId: number; packets: Buffer[]; queuedAt?: number };
 
 type Inflight = { frameId: number; sentAt: number; bytes: number };
 
@@ -21,6 +21,8 @@ export type DeviceStats = {
   lastAckLatencyMs: number | null;
   avgAckLatencyMs: number | null;
   fps: number;                 // frames sent over the last FPS_WINDOW_MS
+  lastFlushMs: number | null;  // time until the frame's last packet left Node
+  avgFlushMs: number | null;
   lastFrameId: number | null;
   lastSentAgeMs: number | null;
 };
@@ -40,6 +42,9 @@ type BroadcasterState = {
   lastFrameId?: number;
   lastSentAt?: number;
   sentTimes: number[];
+  lastFlushMs?: number;     // sendFrameChunked -> last packet handed to the kernel
+  flushSum: number;
+  flushCount: number;
 };
 
 // Legacy pacing (clients that do not send FrameAck): minimum gap between
@@ -184,7 +189,7 @@ export class DeviceBroadcaster {
     while (st.sentTimes.length && now - st.sentTimes[0] > FPS_WINDOW_MS) st.sentTimes.shift();
     if (this.isAckMode(id)) st.inflight.push({ frameId, sentAt: now, bytes });
 
-    st.queue.push({ frameId, packets });
+    st.queue.push({ frameId, packets, queuedAt: now });
     this._drainAsync(id).catch(() => {});
   }
 
@@ -220,6 +225,8 @@ export class DeviceBroadcaster {
       lastAckLatencyMs: st.lastAckLatencyMs ?? null,
       avgAckLatencyMs: st.acksReceived ? Math.round(st.ackLatencySum / st.acksReceived) : null,
       fps: Math.round((fpsFrames / (FPS_WINDOW_MS / 1000)) * 10) / 10,
+      lastFlushMs: st.lastFlushMs ?? null,
+      avgFlushMs: st.flushCount ? Math.round((st.flushSum / st.flushCount) * 10) / 10 : null,
       lastFrameId: st.lastFrameId ?? null,
       lastSentAgeMs: st.lastSentAt ? now - st.lastSentAt : null,
     };
@@ -238,6 +245,7 @@ export class DeviceBroadcaster {
       st = {
         queue: [], sending: false, inflight: [], readyCallbacks: [],
         framesSent: 0, bytesSent: 0, ackTimeouts: 0, acksReceived: 0, ackLatencySum: 0, sentTimes: [],
+        flushSum: 0, flushCount: 0,
       };
       this._state.set(id, st);
     }
@@ -267,7 +275,9 @@ export class DeviceBroadcaster {
         const f = st.queue.shift()!;
         let aborted = false;
 
-        for (const pkt of f.packets) {
+        for (let i = 0; i < f.packets.length; i++) {
+          const pkt = f.packets[i];
+          const last = i === f.packets.length - 1;
           if (!ackMode && st.queue.length > 0) { aborted = true; break; }
 
           for (const ws of new Set(peers)) {
@@ -276,7 +286,15 @@ export class DeviceBroadcaster {
               continue;
             }
             try {
-              ws.send(pkt, { binary: true });
+              if (last && f.queuedAt !== undefined) {
+                const q = f.queuedAt;
+                ws.send(pkt, { binary: true }, () => {
+                  const ms = Date.now() - q;
+                  st.lastFlushMs = ms; st.flushSum += ms; st.flushCount++;
+                });
+              } else {
+                ws.send(pkt, { binary: true });
+              }
             } catch {
               try { ws.close(); } catch {}
               peers.delete(ws);
