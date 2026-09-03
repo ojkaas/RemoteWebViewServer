@@ -464,6 +464,68 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   return newDevice;
 }
 
+/** Liveness: CDP answers, and every device that has a viewer processed a
+ *  capture recently (the fallback screenshot loop guarantees one every ~2 s
+ *  even on a static page, so silence means a dead session). */
+export async function livenessAsync(staleAfterMs = 20_000): Promise<{ ok: boolean; cdp: boolean; stale: string[] }> {
+  const root = getRoot();
+  let cdp = false;
+  if (root) {
+    try {
+      await Promise.race([
+        root.send('Browser.getVersion'),
+        new Promise((_, rej) => setTimeout(() => rej(new Error('cdp timeout')), 3000)),
+      ]);
+      cdp = true;
+    } catch { cdp = false; }
+  }
+  const now = Date.now();
+  const stale: string[] = [];
+  for (const d of devices.values()) {
+    if (broadcaster.getClientCount(d.deviceId) === 0) continue;
+    const last = d.lastProcessedMs ?? d.createdAt;
+    if (now - last > staleAfterMs) stale.push(d.deviceId);
+  }
+  return { ok: cdp && stale.length === 0, cdp, stale };
+}
+
+/** Reload every device's page (scheduled maintenance against SPA memory growth). */
+export async function reloadAllDevicesAsync(reason: string): Promise<number> {
+  let n = 0;
+  for (const d of devices.values()) {
+    try {
+      await d.cdp.send('Page.reload', { ignoreCache: false });
+      d.prevFrameHash = 0;
+      d.processor.requestFullFrame();
+      n++;
+      console.log(`[device] ${d.deviceId}: page reloaded (${reason})`);
+    } catch (e) {
+      console.warn(`[device] ${d.deviceId}: reload failed: ${(e as Error).message}`);
+    }
+  }
+  return n;
+}
+
+let gpuInfo: any = undefined;
+export async function probeGpuAsync(): Promise<any> {
+  const root = getRoot();
+  if (!root) return undefined;
+  try {
+    const info: any = await root.send('SystemInfo.getInfo');
+    const fs = info?.gpu?.featureStatus ?? {};
+    gpuInfo = {
+      devices: (info?.gpu?.devices ?? []).map((g: any) => `${g.vendorString ?? ''} ${g.deviceString ?? ''}`.trim()),
+      driver: info?.gpu?.driverVersion ?? info?.gpu?.devices?.[0]?.driverVersion ?? null,
+      gpuCompositing: fs.gpu_compositing ?? null,
+      rasterization: fs.rasterization ?? null,
+      webgl: fs.webgl ?? null,
+      auxAttributes: { swiftshader: info?.gpu?.auxAttributes?.software_rendering ?? null },
+    };
+  } catch (e) { gpuInfo = { error: (e as Error).message }; }
+  return gpuInfo;
+}
+export function getGpuInfo() { return gpuInfo; }
+
 /** PNG screenshot of what the device's page currently shows (for visual checks). */
 export async function captureDevicePngAsync(id: string): Promise<Buffer | null> {
   const dev = devices.get(id);

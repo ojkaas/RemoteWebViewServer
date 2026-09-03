@@ -18,6 +18,8 @@ FROM mcr.microsoft.com/playwright:v1.55.0-jammy AS runner
 WORKDIR /app
 ARG CHROME_ARGS_PRESET_BUILD=default
 ENV CHROME_ARGS_PRESET_BUILD=$CHROME_ARGS_PRESET_BUILD
+# Intel GPU userspace (iris/i965 + VA-API) so Chromium can use a passed-through /dev/dri
+RUN apt-get update && apt-get install -y --no-install-recommends libgl1-mesa-dri libegl1 libgbm1 mesa-va-drivers intel-media-va-driver libva2 libva-drm2 && rm -rf /var/lib/apt/lists/*
 ENV NODE_ENV=production \
     PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1 \
     PLAYWRIGHT_BROWSERS_PATH=/ms-playwright

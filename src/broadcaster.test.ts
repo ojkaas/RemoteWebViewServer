@@ -113,6 +113,25 @@ describe("DeviceBroadcaster ack flow control", () => {
     expect(b.getStats("d")).toBeNull();
   });
 
+  it("is gated by the slowest of two ack peers sharing a device", async () => {
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
+    const fast = new FakeWs(), slow = new FakeWs();
+    // addClient kicks older sockets for the same id; register both via the internal path
+    b.addClient("d", fast as any, { ack: true });
+    (b as any)._clients.get("d").add(slow);
+    (b as any)._ackPeers.add(slow);
+    b.sendFrameChunked("d", frame(), 1);
+    await tick();
+    expect(fast.sent.length).toBe(1);
+    expect(slow.sent.length).toBe(1);
+    expect(b.canSend("d")).toBe(false);
+    b.handleFrameAck("d", 1, fast as any);
+    expect(b.canSend("d")).toBe(false);   // slow peer still has it in flight
+    b.handleFrameAck("d", 1, slow as any);
+    expect(b.canSend("d")).toBe(true);
+    expect(b.getStats("d")!.inflightCount).toBe(0);
+  });
+
   it("clears in-flight state when the client reconnects", () => {
     const b = new DeviceBroadcaster({ maxInflight: 1 });
     const ws1 = new FakeWs();

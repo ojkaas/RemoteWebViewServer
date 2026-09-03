@@ -2,18 +2,23 @@ import http from 'http';
 import WebSocket, { WebSocketServer } from "ws"
 import env from "env-var";
 import { makeConfigFromParams, setConfigFor, logDeviceConfig } from "./config.js";
-import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot, captureDevicePngAsync } from './deviceManager.js';
+import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot, captureDevicePngAsync, livenessAsync, reloadAllDevicesAsync, probeGpuAsync, getGpuInfo } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
-const SERVER_VERSION = process.env.npm_package_version ?? "1.1.20";
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.21";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one
 // interval is terminated so a dead ESP (reboot, WiFi drop, power cut) does
 // not linger as an OPEN socket whose kernel send buffer we keep filling.
 const WS_HEARTBEAT_MS = env.get("WS_HEARTBEAT_MS").default("15000").asIntPositive();
+// Liveness watchdog: after this many consecutive failed checks (30 s apart)
+// the process exits so Docker's restart policy brings up a fresh Chromium.
+const WATCHDOG_FAILS_TO_EXIT = env.get("WATCHDOG_FAILS_TO_EXIT").default("3").asIntPositive();
+// Daily page reload (local time HH:MM) against SPA memory growth; empty disables.
+const PAGE_RELOAD_AT = env.get("PAGE_RELOAD_AT").default("04:00").asString();
 
 type AliveWebSocket = WebSocket & { isAlive?: boolean };
 
@@ -40,6 +45,8 @@ const wsHttp = http.createServer((req, res) => {
       uptimeMs: Date.now() - startedAt,
       wsClients: wss.clients.size,
       chromeArgsPreset: process.env.CHROME_ARGS_PRESET ?? process.env.CHROME_ARGS_PRESET_BUILD ?? 'default',
+      gpu: getGpuInfo() ?? null,
+      pageReloadAt: PAGE_RELOAD_AT || null,
       quantize565: !/^(0|false|no|off)$/i.test(process.env.QUANTIZE_565 ?? '1'),
       devices: getDevicesSnapshot(),
     }, null, 2);
@@ -101,7 +108,7 @@ wss.on("connection", async (ws: AliveWebSocket, req) => {
         break;
       case MsgType.FrameAck: {
         const fid = parseFrameAckPacket(buf);
-        if (fid !== null) broadcaster.handleFrameAck(id, fid);
+        if (fid !== null) broadcaster.handleFrameAck(id, fid, ws);
         break;
       }
       case MsgType.FrameStats:
@@ -138,14 +145,48 @@ const heartbeat = setInterval(() => {
 }, WS_HEARTBEAT_MS);
 heartbeat.unref();
 
+// Health: 200 only when Chromium answers and every viewed device is alive.
+// Docker's healthcheck hits this; the watchdog below turns persistent failure
+// into a restart.
 http.createServer(async (_req, res) => {
   try {
-    res.writeHead(200); res.end('ok');
+    const l = await livenessAsync();
+    res.writeHead(l.ok ? 200 : 503, { 'content-type': 'application/json' });
+    res.end(JSON.stringify(l));
   } catch (e) {
     res.writeHead(500); res.end('err');
   }
 }).listen(HEALTH_PORT);
 
+let watchdogFails = 0;
+setInterval(async () => {
+  try {
+    const l = await livenessAsync();
+    if (l.ok) { watchdogFails = 0; return; }
+    watchdogFails++;
+    console.error(`[watchdog] unhealthy (${watchdogFails}/${WATCHDOG_FAILS_TO_EXIT}): cdp=${l.cdp} stale=${l.stale.join(',') || '-'}`);
+    if (watchdogFails >= WATCHDOG_FAILS_TO_EXIT) {
+      console.error('[watchdog] exiting so the container restarts');
+      setTimeout(() => process.exit(1), 100);
+    }
+  } catch { /* ignore */ }
+}, 30_000).unref();
+
+let lastReloadDay = '';
+if (PAGE_RELOAD_AT) {
+  setInterval(async () => {
+    const now = new Date();
+    const hhmm = `${String(now.getHours()).padStart(2, '0')}:${String(now.getMinutes()).padStart(2, '0')}`;
+    const day = now.toDateString();
+    if (hhmm === PAGE_RELOAD_AT && lastReloadDay !== day) {
+      lastReloadDay = day;
+      const n = await reloadAllDevicesAsync(`scheduled ${PAGE_RELOAD_AT}`);
+      console.log(`[maintenance] reloaded ${n} page(s)`);
+    }
+  }, 30_000).unref();
+}
+
 setInterval(() => cleanupIdleAsync(), 60_000);
+probeGpuAsync().then(g => console.log(`[cdp] gpu: ${JSON.stringify(g)}`)).catch(() => {});
 
 wsHttp.listen(WS_PORT, () => console.log(`[server] WebSocket listening on :${WS_PORT} (GET /stats for status)`));
