@@ -42,7 +42,7 @@ export type DeviceSession = {
   processedFrames: number;
   skippedUnchanged: number;
   lastProcessMs?: number;
-  timing: { decodeMs: number; diffEncodeMs: number; hashMs: number; encodeMs: number; rects: number; captureWaitMs: number; n: number };
+  timing: { decodeMs: number; diffEncodeMs: number; hashMs: number; encodeMs: number; rects: number; rleRects: number; rleBytes: number; captureWaitMs: number; n: number };
   lastCaptureAt?: number;
   createdAt: number;
 
@@ -181,6 +181,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     maxBytesPerMessage: cfg.maxBytesPerMessage,
     chroma: cfg.chroma,
     quantize565: QUANTIZE_565,
+    rleMaxRatio: cfg.rleMaxRatio,
+    rleMaxPixels: 32768,
   });
 
   const newDevice: DeviceSession = {
@@ -205,7 +207,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     processedFrames: 0,
     skippedUnchanged: 0,
     lastProcessMs: undefined,
-    timing: { decodeMs: 0, diffEncodeMs: 0, hashMs: 0, encodeMs: 0, rects: 0, captureWaitMs: 0, n: 0 },
+    timing: { decodeMs: 0, diffEncodeMs: 0, hashMs: 0, encodeMs: 0, rects: 0, rleRects: 0, rleBytes: 0, captureWaitMs: 0, n: 0 },
     lastCaptureAt: undefined,
     createdAt: Date.now(),
     pendingScreencastSessions: [],
@@ -280,6 +282,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       dev.timing.hashMs += out.hashMs ?? 0;
       dev.timing.encodeMs += out.encodeMs ?? 0;
       dev.timing.rects += out.rects.length;
+      dev.timing.rleRects += out.rleRects ?? 0;
+      dev.timing.rleBytes += out.rleBytes ?? 0;
       if (dev.lastCaptureAt) dev.timing.captureWaitMs += t0 - dev.lastCaptureAt;
       dev.timing.n++;
       dev.lastProcessMs = elapsed;
@@ -559,6 +563,9 @@ export function getDevicesSnapshot() {
     avgHashMs: d.timing.n ? Math.round(d.timing.hashMs / d.timing.n * 10) / 10 : null,
     avgEncodeMs: d.timing.n ? Math.round(d.timing.encodeMs / d.timing.n * 10) / 10 : null,
     avgRectsPerFrame: d.timing.n ? Math.round(d.timing.rects / d.timing.n * 10) / 10 : null,
+    rleRectShare: d.timing.rects ? Math.round(d.timing.rleRects / d.timing.rects * 100) : null,
+    rleBytesTotal: d.timing.rleBytes,
+    rleMaxRatio: d.cfg.rleMaxRatio,
     avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,
     screencastFormat: d.cfg.screencastFormat,
     screencastMode: d.cfg.screencastMode,

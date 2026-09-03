@@ -1,6 +1,6 @@
 import os from "node:os";
 import sharp from "sharp";
-import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES } from "./protocol.js";
+import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES, encodeRle565 } from "./protocol.js";
 import { hash32 } from "./util.js";
 import { Q5, Q6 } from "./deviceManager.js";
 
@@ -8,7 +8,7 @@ sharp.concurrency(Math.max(1, os.cpus().length - 1));
 
 export type RGBA = { data: Buffer; width: number; height: number };
 
-export type Rect = { x: number; y: number; w: number; h: number; data: Buffer };
+export type Rect = { x: number; y: number; w: number; h: number; data: Buffer; enc?: Encoding };
 
 export type FrameOut = {
   rects: Rect[];
@@ -16,6 +16,8 @@ export type FrameOut = {
   encoding: Encoding;
   hashMs?: number;     // tile hashing + merge
   encodeMs?: number;   // JPEG encoding of the rects
+  rleRects?: number;   // rects sent losslessly
+  rleBytes?: number;
 };
 
 export type FrameProcessorCfg = {
@@ -27,6 +29,10 @@ export type FrameProcessorCfg = {
   maxBytesPerMessage: number;
   chroma?: '4:4:4' | '4:2:0';
   quantize565?: boolean;   // hash on RGB565-quantised values so sub-step changes are ignored
+  // Lossless RLE565 instead of JPEG for rects that compress to at most this
+  // fraction of their raw RGB565 size (flat UI areas, backgrounds). 0 disables.
+  rleMaxRatio?: number;
+  rleMaxPixels?: number;   // client-side decode buffer limit (pixels)
 };
 
 export class FrameProcessor {
@@ -91,6 +97,8 @@ export class FrameProcessor {
     }
     out.hashMs = tEnc0 - tHash0;
     out.encodeMs = Date.now() - tEnc0;
+    out.rleRects = out.rects.filter(r => r.enc === Encoding.RAW565_RLE).length;
+    out.rleBytes = out.rects.filter(r => r.enc === Encoding.RAW565_RLE).reduce((n, r) => n + r.data.length, 0);
 
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
     for (let i = 0; i < out.rects.length; i++) {
@@ -116,8 +124,7 @@ export class FrameProcessor {
     const rects = await Promise.all(
       rectsForFull.map(async (r) => {
         const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-        const data = await this._encode(raw, r.w, r.h, encoding);
-        return { x: r.x, y: r.y, w: r.w, h: r.h, data } as Rect;
+        return this._encodeRect(raw, r.x, r.y, r.w, r.h, encoding);
       })
     );
 
@@ -137,8 +144,7 @@ export class FrameProcessor {
     const out = await Promise.all(
       mergedRects.map(async (r) => {
         const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-        const data = await this._encode(raw, r.w, r.h, encoding);
-        return { ...r, data } as Rect;
+        return this._encodeRect(raw, r.x, r.y, r.w, r.h, encoding);
       })
     );
 
@@ -331,6 +337,20 @@ export class FrameProcessor {
       rgba.data.copy(out, yy * w * 4, src, src + w * 4);
     }
     return out;
+  }
+
+  /** Lossless RLE when the rect is flat enough, else the frame's encoding. */
+  private async _encodeRect(raw: Buffer, x: number, y: number, w: number, h: number, enc: Encoding): Promise<Rect> {
+    const ratio = this._cfg.rleMaxRatio ?? 0;
+    const maxPx = this._cfg.rleMaxPixels ?? 32768;
+    if (ratio > 0 && w * h <= maxPx) {
+      const rle = encodeRle565(raw, w, h);
+      if (rle.length <= Math.max(64, w * h * 2 * ratio)) {
+        return { x, y, w, h, data: rle, enc: Encoding.RAW565_RLE };
+      }
+    }
+    const data = await this._encode(raw, w, h, enc);
+    return { x, y, w, h, data };
   }
 
   private async _encode(rawRgba: Buffer, w: number, h: number, enc: Encoding): Promise<Buffer> {

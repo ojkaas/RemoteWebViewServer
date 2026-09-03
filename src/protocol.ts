@@ -63,6 +63,7 @@ export interface Rect {
   w: number;
   h: number;
   data: Buffer;
+  enc?: Encoding;   // per-rect encoding; defaults to the frame's encoding
 }
 
 export interface Frame {
@@ -186,29 +187,70 @@ export function buildFramePacket(rects: Rect[], enc: Encoding, frameId: number, 
 }
 
 export function buildFramePackets(rects: Rect[], enc: Encoding, frameId: number, isFullFrame: boolean, maxBytes: number): Buffer[] {
-  const chunks: Rect[][] = [];
-  let cur: Rect[] = [];
-  let curBytes = FRAME_HEADER_BYTES;
-
+  // A packet carries one encoding, so rects are grouped by their encoding
+  // (JPEG first, then lossless RLE); only the very last packet of the frame
+  // carries FLAG_LAST_OF_FRAME.
+  const groups = new Map<Encoding, Rect[]>();
   for (const r of rects) {
-    const rBytes = TILE_HEADER_BYTES + r.data.length;
-    if (cur.length && curBytes + rBytes > maxBytes) {
-      chunks.push(cur);
-      cur = [];
-      curBytes = FRAME_HEADER_BYTES;
-    }
-    cur.push(r);
-    curBytes += rBytes;
+    const e = r.enc ?? enc;
+    if (!groups.has(e)) groups.set(e, []);
+    groups.get(e)!.push(r);
   }
-  if (cur.length) chunks.push(cur);
+  const chunks: { enc: Encoding; rects: Rect[] }[] = [];
+  for (const [e, list] of groups) {
+    let cur: Rect[] = [];
+    let curBytes = FRAME_HEADER_BYTES;
+    for (const r of list) {
+      const rBytes = TILE_HEADER_BYTES + r.data.length;
+      if (cur.length && curBytes + rBytes > maxBytes) {
+        chunks.push({ enc: e, rects: cur });
+        cur = [];
+        curBytes = FRAME_HEADER_BYTES;
+      }
+      cur.push(r);
+      curBytes += rBytes;
+    }
+    if (cur.length) chunks.push({ enc: e, rects: cur });
+  }
 
   const out: Buffer[] = [];
   for (let i = 0; i < chunks.length; i++) {
     let flags = (i === chunks.length - 1) ? FLAG_LAST_OF_FRAME : 0;
     if (isFullFrame) flags |= FLAG_IS_FULL_FRAME;
-    out.push(buildFramePacket(chunks[i], enc, frameId, flags));
+    out.push(buildFramePacket(chunks[i].rects, chunks[i].enc, frameId, flags));
   }
   return out;
+}
+
+// RAW565_RLE: runs of [count u8 (1..255)][pixel u16 LE] in raster order,
+// runs may span rows. Lossless for an RGB565 panel.
+export function encodeRle565(rgba: Buffer, w: number, h: number): Buffer {
+  const n = w * h;
+  const out = Buffer.allocUnsafe(n * 3 + 3);   // worst case: every pixel its own run
+  let o = 0;
+  let prev = -1, run = 0;
+  for (let i = 0, j = 0; i < n; i++, j += 4) {
+    const v = ((rgba[j] & 0xF8) << 8) | ((rgba[j + 1] & 0xFC) << 3) | (rgba[j + 2] >> 3);
+    if (v === prev && run < 255) { run++; continue; }
+    if (run) { out[o++] = run; out[o++] = prev & 0xFF; out[o++] = prev >> 8; }
+    prev = v; run = 1;
+  }
+  if (run) { out[o++] = run; out[o++] = prev & 0xFF; out[o++] = prev >> 8; }
+  return out.subarray(0, o);
+}
+
+export function decodeRle565(data: Buffer, w: number, h: number): Uint16Array | null {
+  const n = w * h;
+  const px = new Uint16Array(n);
+  let i = 0, o = 0;
+  while (i + 3 <= data.length && o < n) {
+    const run = data[i], v = data[i + 1] | (data[i + 2] << 8);
+    i += 3;
+    if (run === 0 || o + run > n) return null;
+    px.fill(v, o, o + run);
+    o += run;
+  }
+  return o === n ? px : null;
 }
 
 export type ParsedFrameHeader = {

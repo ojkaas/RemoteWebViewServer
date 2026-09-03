@@ -13,6 +13,8 @@ import {
   buildFrameAckPacket,
   parseFrameAckPacket,
   FRAME_ACK_BYTES,
+  encodeRle565,
+  decodeRle565,
 } from "./protocol.js";
 
 function buildOpenURL(url: string, flags: number): Buffer {
@@ -52,6 +54,47 @@ describe("FrameAck packet", () => {
   });
   it("rejects other packet types", () => {
     expect(parseFrameAckPacket(buildOpenURL("x", 0))).toBeNull();
+  });
+});
+
+describe("RLE565", () => {
+  it("round-trips a flat tile into a handful of bytes", () => {
+    const w = 64, h = 64;
+    const rgba = Buffer.alloc(w * h * 4);
+    for (let i = 0; i < w * h; i++) { rgba[i * 4] = 16; rgba[i * 4 + 1] = 24; rgba[i * 4 + 2] = 32; rgba[i * 4 + 3] = 255; }
+    const rle = encodeRle565(rgba, w, h);
+    expect(rle.length).toBeLessThan(64);
+    const px = decodeRle565(rle, w, h)!;
+    expect(px.length).toBe(w * h);
+    expect(px[0]).toBe(((16 & 0xF8) << 8) | ((24 & 0xFC) << 3) | (32 >> 3));
+    expect(px[w * h - 1]).toBe(px[0]);
+  });
+  it("round-trips noise exactly and rejects truncated data", () => {
+    const w = 16, h = 8;
+    const rgba = Buffer.alloc(w * h * 4);
+    for (let i = 0; i < rgba.length; i++) rgba[i] = (i * 37) & 0xFF;
+    const rle = encodeRle565(rgba, w, h);
+    const px = decodeRle565(rle, w, h)!;
+    for (let i = 0; i < w * h; i++) {
+      const j = i * 4;
+      expect(px[i]).toBe(((rgba[j] & 0xF8) << 8) | ((rgba[j + 1] & 0xFC) << 3) | (rgba[j + 2] >> 3));
+    }
+    expect(decodeRle565(rle.subarray(0, rle.length - 3), w, h)).toBeNull();
+  });
+  it("groups mixed encodings into separate packets, last flag on the final one", () => {
+    const rects = [
+      { x: 0, y: 0, w: 32, h: 32, data: Buffer.alloc(50, 1) },
+      { x: 32, y: 0, w: 32, h: 32, data: Buffer.alloc(9, 2), enc: Encoding.RAW565_RLE },
+      { x: 64, y: 0, w: 32, h: 32, data: Buffer.alloc(50, 3) },
+    ];
+    const pkts = buildFramePackets(rects, Encoding.JPEG, 9, false, 100000);
+    expect(pkts.length).toBe(2);
+    const heads = pkts.map(p => parseFrameHeader(p)!);
+    expect(heads[0].enc).toBe(Encoding.JPEG);
+    expect(heads[0].tileCount).toBe(2);
+    expect(heads[1].enc).toBe(Encoding.RAW565_RLE);
+    expect(heads[0].flags & FLAG_LAST_OF_FRAME).toBe(0);
+    expect(heads[1].flags & FLAG_LAST_OF_FRAME).toBe(FLAG_LAST_OF_FRAME);
   });
 });
 
