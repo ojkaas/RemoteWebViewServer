@@ -7,7 +7,7 @@ import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
-const SERVER_VERSION = process.env.npm_package_version ?? "1.1.22";
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.23";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one
@@ -163,6 +163,11 @@ setInterval(async () => {
   try {
     const l = await livenessAsync();
     if (l.ok) { watchdogFails = 0; return; }
+    // Only a dead/hung Chromium justifies a restart. Stale devices while CDP
+    // still answers usually mean the host is starved (observed at load >100
+    // during an Android build); restarting then only adds Chromium relaunches
+    // to an overloaded box and drops the panels for nothing.
+    if (l.cdp) { watchdogFails = 0; console.warn(`[watchdog] stale but CDP alive (host busy?): ${l.stale.join(',')}`); return; }
     watchdogFails++;
     console.error(`[watchdog] unhealthy (${watchdogFails}/${WATCHDOG_FAILS_TO_EXIT}): cdp=${l.cdp} stale=${l.stale.join(',') || '-'}`);
     if (watchdogFails >= WATCHDOG_FAILS_TO_EXIT) {
