@@ -54,10 +54,39 @@ def device_params(device: dict) -> str:
     return "&".join(f"{k}={v}" for k, v in m.items() if v is not None and v != "")
 
 
+def _raw_ws_kick(server: str, path: str) -> None:
+    """Minimal RFC 6455 client handshake, no dependencies: connect, wait 0.2 s, close."""
+    import socket, base64, os
+    host, _, port = server.partition(":")
+    s = socket.create_connection((host, int(port or 80)), timeout=5)
+    key = base64.b64encode(os.urandom(16)).decode()
+    crlf = "\r\n"
+    req = (f"GET {path} HTTP/1.1{crlf}Host: {server}{crlf}Upgrade: websocket{crlf}Connection: Upgrade{crlf}"
+           f"Sec-WebSocket-Key: {key}{crlf}Sec-WebSocket-Version: 13{crlf}{crlf}")
+    s.sendall(req.encode())
+    buf = b""
+    while b"\r\n\r\n" not in buf:
+        chunk = s.recv(4096)
+        if not chunk:
+            break
+        buf += chunk
+    if not buf.startswith(b"HTTP/1.1 101"):
+        raise RuntimeError(f"handshake failed: {buf[:60]!r}")
+    time.sleep(0.2)
+    try:
+        s.sendall(b"\x88\x80" + os.urandom(4))   # masked close frame
+    finally:
+        s.close()
+
+
 async def kick(server: str, device: dict) -> None:
-    import websockets  # type: ignore
-    uri = f"ws://{server}/?id={device['id']}&{device_params(device)}"
-    async with websockets.connect(uri, max_size=None):
+    path = f"/?id={device['id']}&{device_params(device)}"
+    try:
+        import websockets  # type: ignore
+    except ImportError:
+        _raw_ws_kick(server, path)
+        return
+    async with websockets.connect(f"ws://{server}{path}", max_size=None):
         await asyncio.sleep(0.2)
 
 

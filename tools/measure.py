@@ -31,7 +31,7 @@ def main() -> int:
     ap.add_argument("--wait-version")
     ap.add_argument("--wait-timeout", type=int, default=150)
     ap.add_argument("--label", default="")
-    ap.add_argument("--cpu-host", help="ssh host to sample chrome/node CPU with top during the window")
+    ap.add_argument("--cpu-host", help="ssh host (or 'local') to sample chrome/node CPU with top during the window")
     args = ap.parse_args()
 
     def dev():
@@ -70,7 +70,8 @@ def main() -> int:
         cmd = (f"top -bn2 -d {args.seconds} -w 200 | awk '/^top/{{n++}} n==2 && /(chrome|node|headless)/{{c[$12]+=$9}} END{{for(k in c) printf \"%s=%.0f \", k, c[k]}}'; "
                f"printf 'load=%s' \"$(cut -d' ' -f1 /proc/loadavg)\"")
         try:
-            cpu = subprocess.run(["ssh", "-o", "BatchMode=yes", args.cpu_host, cmd], capture_output=True, text=True, timeout=args.seconds + 30).stdout.strip()
+            argv = ["bash", "-c", cmd] if args.cpu_host == "local" else ["ssh", "-o", "BatchMode=yes", args.cpu_host, cmd]
+            cpu = subprocess.run(argv, capture_output=True, text=True, timeout=args.seconds + 30).stdout.strip()
         except Exception as e:
             cpu = f"cpu-sample-failed:{e}"
     else:
