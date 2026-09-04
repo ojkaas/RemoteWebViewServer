@@ -7,7 +7,7 @@ import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
-const SERVER_VERSION = process.env.npm_package_version ?? "1.1.26";
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.27";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one
@@ -84,8 +84,9 @@ wss.on("connection", async (ws: AliveWebSocket, req) => {
     logDeviceConfig(id, cfg);
 
     broadcaster.addClient(id, ws, { ack: ackFlowControl });
-    broadcaster.setMaxInflight(id, cfg.maxInflight || undefined);
     dev = await ensureDeviceAsync(id, cfg);
+    // after ensureDeviceAsync: a reconfigure deletes the old device and forgets its limit
+    broadcaster.setMaxInflight(id, cfg.maxInflight || undefined);
   } catch (e) {
     console.error(`[server] setup failed for ${id}, closing connection: ${(e as Error).message}`);
     ws.off("message", earlyHandler);
