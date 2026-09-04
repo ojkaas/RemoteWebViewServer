@@ -2,12 +2,12 @@ import http from 'http';
 import WebSocket, { WebSocketServer } from "ws"
 import env from "env-var";
 import { makeConfigFromParams, setConfigFor, logDeviceConfig } from "./config.js";
-import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot, captureDevicePngAsync, livenessAsync, reloadAllDevicesAsync, probeGpuAsync, getGpuInfo } from './deviceManager.js';
+import { broadcaster, ensureDeviceAsync, cleanupIdleAsync, getDevicesSnapshot, captureDevicePngAsync, livenessAsync, reloadAllDevicesAsync, probeGpuAsync, getGpuInfo, blankRecoveryAsync } from './deviceManager.js';
 import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
-const SERVER_VERSION = process.env.npm_package_version ?? "1.1.25";
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.26";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one
@@ -162,6 +162,12 @@ http.createServer(async (_req, res) => {
 let watchdogFails = 0;
 setInterval(async () => {
   try {
+    const blank = await blankRecoveryAsync();
+    if (blank.fatal.length) {
+      console.error(`[blank] still white after reloads on ${blank.fatal.join(',')}; exiting so Chromium restarts`);
+      setTimeout(() => process.exit(1), 100);
+      return;
+    }
     const l = await livenessAsync();
     if (l.ok) { watchdogFails = 0; return; }
     // Only a dead/hung Chromium justifies a restart. Stale devices while CDP

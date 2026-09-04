@@ -42,6 +42,11 @@ export type DeviceSession = {
   processedFrames: number;
   skippedUnchanged: number;
   lastProcessMs?: number;
+  // Blank-render detector: consecutive processed captures that were uniform
+  // white (seen once with GPU rasterisation: the compositor painted blank).
+  blankStreak: number;
+  blankReloads: number;
+  blankSince?: number;
   timing: { decodeMs: number; diffEncodeMs: number; hashMs: number; encodeMs: number; rects: number; rleRects: number; rleBytes: number; captureWaitMs: number; n: number };
   lastCaptureAt?: number;
   createdAt: number;
@@ -72,6 +77,14 @@ for (let v = 0; v < 256; v++) {
 }
 export const QUANTIZE_565 = !/^(0|false|no|off)$/i.test(process.env.QUANTIZE_565 ?? '1');
 export { Q5, Q6 };
+
+/** Uniform white capture (every 97th pixel sampled). A real page is never all-white. */
+function isBlankWhite(rgba: Buffer): boolean {
+  for (let i = 0; i < rgba.length; i += 97 * 4) {
+    if (rgba[i] !== 255 || rgba[i + 1] !== 255 || rgba[i + 2] !== 255) return false;
+  }
+  return true;
+}
 
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
@@ -213,6 +226,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     lastCaptureAt: undefined,
     createdAt: Date.now(),
     pendingScreencastSessions: [],
+    blankStreak: 0,
+    blankReloads: 0,
     screencastPaused: false,
     screencastPauses: 0,
     captureAndPush: async () => { },
@@ -277,6 +292,13 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
         .raw()
         .toBuffer({ resolveWithObject: true });
       const t1 = Date.now();
+      if (isBlankWhite(data)) {
+        dev.blankStreak++;
+        if (!dev.blankSince) dev.blankSince = Date.now();
+      } else {
+        dev.blankStreak = 0;
+        dev.blankSince = undefined;
+      }
       const out = await processor.processFrameAsync({ data, width: info.width, height: info.height });
       const elapsed = Date.now() - t0;
       dev.timing.decodeMs += t1 - t0;
@@ -470,6 +492,33 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   return newDevice;
 }
 
+/** Blank-render recovery: reload a page that has rendered white for a while;
+ *  after two reloads without improvement report it as fatal (caller restarts). */
+export async function blankRecoveryAsync(): Promise<{ reloaded: string[]; fatal: string[] }> {
+  const reloaded: string[] = [], fatal: string[] = [];
+  const now = Date.now();
+  for (const d of devices.values()) {
+    if (broadcaster.getClientCount(d.deviceId) === 0) continue;
+    if (d.blankStreak >= 3 && d.blankSince && now - d.blankSince > 10_000) {
+      if (d.blankReloads >= 2) { fatal.push(d.deviceId); continue; }
+      d.blankReloads++;
+      d.blankStreak = 0;
+      d.blankSince = undefined;
+      try {
+        await d.cdp.send('Page.reload', { ignoreCache: true });
+        d.prevFrameHash = 0;
+        d.processor.requestFullFrame();
+        reloaded.push(d.deviceId);
+        console.warn(`[blank] ${d.deviceId}: page rendered white for >10 s, reloaded (${d.blankReloads}/2)`);
+      } catch (e) { console.warn(`[blank] ${d.deviceId}: reload failed: ${(e as Error).message}`); }
+    } else if (d.blankStreak === 0 && d.blankReloads > 0 && d.lastProcessedMs && now - d.lastProcessedMs < 60_000) {
+      // healthy again for a while: forget the reload count
+      d.blankReloads = 0;
+    }
+  }
+  return { reloaded, fatal };
+}
+
 /** Liveness: CDP answers, and every device that has a viewer processed a
  *  capture recently (the fallback screenshot loop guarantees one every ~2 s
  *  even on a static page, so silence means a dead session). */
@@ -576,6 +625,8 @@ export function getDevicesSnapshot() {
     chroma: d.cfg.chroma,
     reducedMotion: d.cfg.reducedMotion,
     waitingForAck: !!d.waitingForAck,
+    blankStreak: d.blankStreak,
+    blankReloads: d.blankReloads,
     pendingFrame: !!d.pendingB64,
     transport: broadcaster.getStats(d.deviceId),
   }));

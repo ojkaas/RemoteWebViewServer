@@ -32,7 +32,7 @@ def post(url, body):
         return r.status
 
 
-def measure_transition(server, device_id, fire, timeout_s=5.0):
+def measure_transition(server, device_id, fire, timeout_s=5.0, min_kb=15):
     """fire() triggers the page change; returns (ms until first new frame acked, frames, bytes) or None."""
     before = get_dev(server, device_id)
     tb = before["transport"]
@@ -47,7 +47,7 @@ def measure_transition(server, device_id, fire, timeout_s=5.0):
             last = d
             t = d["transport"]
             # a real screen transition is a big frame; idle-animation frames are ~15-25 KB
-            if first_ack_ms is None and d["frameId"] > fid0 and t["acksReceived"] > acks0 and t["bytesSent"] - bytes0 >= 15 * 1024:
+            if first_ack_ms is None and d["frameId"] > fid0 and t["acksReceived"] > acks0 and t["bytesSent"] - bytes0 >= min_kb * 1024:
                 first_ack_ms = (time.perf_counter() - t0) * 1000
                 # keep polling briefly to count the frames the transition produced
                 t_end = time.perf_counter() + 0.6
@@ -69,17 +69,18 @@ def main():
     ap.add_argument("--device", required=True)
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--label", default="")
+    ap.add_argument("--min-kb", type=int, default=15, help="bytes a real screen transition must carry (default 15 KB; use ~4 with reduced motion)")
     args = ap.parse_args()
 
     scan_ms, clear_ms = [], []
     for i in range(args.runs):
         bc = BARCODES[i % len(BARCODES)]
-        r = measure_transition(args.server, args.device, lambda: post(f"http://{args.frontend}/api/scan", {"barcode": bc}))
+        r = measure_transition(args.server, args.device, lambda: post(f"http://{args.frontend}/api/scan", {"barcode": bc}), min_kb=args.min_kb)
         if r is None:
             print(f"run {i + 1}: scan -> NO FRAME within 5 s"); return 1
         scan_ms.append(r[0]); print(f"run {i + 1}: scan {bc}: product on screen after {r[0]:.0f} ms ({r[1]} frames, {r[2] // 1024} KB)")
         time.sleep(1.5)
-        r = measure_transition(args.server, args.device, lambda: post(f"http://{args.frontend}/api/action", {"barcode": bc, "action": "dismiss"}))
+        r = measure_transition(args.server, args.device, lambda: post(f"http://{args.frontend}/api/action", {"barcode": bc, "action": "dismiss"}), min_kb=args.min_kb)
         if r is None:
             print(f"run {i + 1}: clear -> NO FRAME within 5 s"); return 1
         clear_ms.append(r[0]); print(f"run {i + 1}: clear: idle screen after {r[0]:.0f} ms ({r[1]} frames, {r[2] // 1024} KB)")
