@@ -494,6 +494,9 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
 
     newDevice.mutationCaptureTimer = setTimeout(async () => {
       newDevice.mutationCaptureTimer = undefined;
+      // Something happened on the page (a scan, a state change): let its
+      // frame bypass the in-flight limit once, like a touch does.
+      broadcaster.markInteraction(newDevice.deviceId);
       try {
         await newDevice.captureAndPush('dom-mutation', false);
       } catch { /* session may be closed */ }

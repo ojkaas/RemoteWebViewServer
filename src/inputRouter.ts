@@ -1,4 +1,5 @@
 import type { DeviceSession } from "./deviceManager.js";
+import { broadcaster } from "./deviceManager.js";
 import { FLAG_OPENURL_FORCE, TouchKind, parseFrameStatsPacket, parseOpenURLPacket, parseTouchPacket } from "./protocol.js";
 import { mapPointForRotation } from "./util.js";
 
@@ -19,6 +20,9 @@ export class InputRouter {
       if (now - this._lastMoveAt < this._moveThrottleMs) return;
       this._lastMoveAt = now;
     }
+    // A finger going down is the earliest signal that a response frame is
+    // coming: open the interaction window before the page even reacts.
+    if (pkt.kind === TouchKind.Down || pkt.kind === TouchKind.Tap) broadcaster.markInteraction(dev.deviceId);
 
     await this._dispatchTouchAsync(dev, pkt.kind, pkt.x, pkt.y);
   }

@@ -144,3 +144,42 @@ describe("DeviceBroadcaster ack flow control", () => {
     expect(b.getClientCount("d")).toBe(1);
   });
 });
+
+describe("interaction priority", () => {
+  it("lets one extra frame through per interaction window, then gates again", () => {
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
+    const ws = new FakeWs();
+    b.addClient("d", ws as any, { ack: true });
+    b.sendFrameChunked("d", frame(), 1);
+    expect(b.canSend("d")).toBe(false);          // one in flight, limit 1
+    b.markInteraction("d");
+    expect(b.canSend("d")).toBe(true);           // the response may go out behind it
+    b.sendFrameChunked("d", frame(), 2);
+    expect(b.getStats("d")!.inflightCount).toBe(2);
+    expect(b.getStats("d")!.priorityFrames).toBe(1);
+    expect(b.canSend("d")).toBe(false);          // credit used: back to the normal limit
+    b.handleFrameAck("d", 2);
+    expect(b.canSend("d")).toBe(true);
+  });
+
+  it("fires a waiting ready callback when the window opens", () => {
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
+    const ws = new FakeWs();
+    b.addClient("d", ws as any, { ack: true });
+    b.sendFrameChunked("d", frame(), 1);
+    const cb = vi.fn();
+    b.onReady("d", cb);
+    expect(cb).not.toHaveBeenCalled();
+    b.markInteraction("d");
+    expect(cb).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not grant anything without an open window or in legacy mode", () => {
+    const b = new DeviceBroadcaster({ maxInflight: 1 });
+    const ws = new FakeWs();
+    b.addClient("d", ws as any, { ack: true });
+    b.sendFrameChunked("d", frame(), 1);
+    expect(b.canSend("d")).toBe(false);
+    expect(b.getStats("d")!.priorityActive).toBe(false);
+  });
+});

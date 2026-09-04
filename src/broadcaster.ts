@@ -25,9 +25,14 @@ export type DeviceStats = {
   avgFlushMs: number | null;
   lastFrameId: number | null;
   lastSentAgeMs: number | null;
+  priorityActive: boolean;     // an interaction window is open
+  priorityFrames: number;      // frames that used the extra interaction slot
 };
 
 type BroadcasterState = {
+  priorityUntil: number;       // interaction window end (ms epoch)
+  priorityCredit: number;      // extra in-flight slots left in this window (0/1)
+  priorityFrames: number;
   queue: OutFrame[];
   sending: boolean;
   inflight: Map<WebSocket, Inflight[]>;   // per ack peer, oldest first
@@ -59,6 +64,7 @@ const BACKPRESSURE_LOW = 16 * 1024;
 // Ack-based flow control: a frame is considered lost if the client did not
 // ack it within this time; the next frame is then sent regardless.
 export const ACK_TIMEOUT_MS = 3000;
+export const INTERACTION_WINDOW_MS = 1500;
 // Frames allowed in flight per device in ack mode. 1 = strictly serial
 // (lowest latency), 2 = encode the next frame while the client decodes the
 // previous one (about double the throughput, worst-case latency two frames).
@@ -121,6 +127,27 @@ export class DeviceBroadcaster {
   }
   private _limit(id: string): number { return this._perDeviceMax.get(id) ?? this._maxInflight; }
 
+  /**
+   * Interaction priority. A touch (or a DOM change on the page) opens a short
+   * window in which ONE extra frame may go on the wire even though the
+   * in-flight limit is reached. The response to the interaction then leaves
+   * immediately behind whatever frame is still being transferred instead of
+   * waiting a full ack round trip for it (100-300 ms on a weak WiFi link).
+   * One credit per window keeps this from turning into a permanent +1.
+   */
+  markInteraction(id: string, windowMs = INTERACTION_WINDOW_MS): void {
+    const st = this._ensureState(id);
+    const now = Date.now();
+    st.priorityUntil = now + windowMs;
+    st.priorityCredit = 1;
+    // a capture already waiting for an ack slot may proceed right away
+    if (st.readyCallbacks.length && this.canSend(id)) this._fireReady(st);
+  }
+
+  private _priorityOpen(st: BroadcasterState, now: number): boolean {
+    return st.priorityCredit > 0 && now < st.priorityUntil;
+  }
+
   getClientCount(id: string): number {
     return this._clients.get(id)?.size ?? 0;
   }
@@ -151,7 +178,7 @@ export class DeviceBroadcaster {
         st.ackTimeouts++;
         console.warn(`[broadcaster] ${id}: no ack for frame ${dead.frameId} after ${now - dead.sentAt}ms, continuing`);
       }
-      if (list.length >= this._limit(id)) return false;
+      if (list.length >= this._limit(id) + (this._priorityOpen(st, now) ? 1 : 0)) return false;
     }
     return true;
   }
@@ -205,6 +232,12 @@ export class DeviceBroadcaster {
 
     const st = this._ensureState(id);
     const now = Date.now();
+    if (this._priorityOpen(st, now)) {
+      const limit = this._limit(id);
+      let usedExtra = false;
+      for (const [ws, list] of st.inflight) if (this._ackPeers.has(ws) && list.length >= limit) usedExtra = true;
+      if (usedExtra) { st.priorityCredit = 0; st.priorityFrames++; }
+    }
     st.framesSent++;
     st.bytesSent += bytes;
     st.lastFrameId = frameId;
@@ -258,6 +291,8 @@ export class DeviceBroadcaster {
       avgFlushMs: st.flushCount ? Math.round((st.flushSum / st.flushCount) * 10) / 10 : null,
       lastFrameId: st.lastFrameId ?? null,
       lastSentAgeMs: st.lastSentAt ? now - st.lastSentAt : null,
+      priorityActive: this._priorityOpen(st, now),
+      priorityFrames: st.priorityFrames,
     };
   }
 
@@ -273,6 +308,7 @@ export class DeviceBroadcaster {
     if (!st) {
       st = {
         queue: [], sending: false, inflight: new Map(), readyCallbacks: [],
+        priorityUntil: 0, priorityCredit: 0, priorityFrames: 0,
         framesSent: 0, bytesSent: 0, ackTimeouts: 0, acksReceived: 0, ackLatencySum: 0, sentTimes: [],
         flushSum: 0, flushCount: 0,
       };
