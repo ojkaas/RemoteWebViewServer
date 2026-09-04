@@ -7,7 +7,7 @@ export type DeviceConfig = {
   tileSize: number;                 // px
   fullFrameTileCount: number;       // tiles
   fullFrameAreaThreshold: number;   // 0..1
-  fullFrameEvery: number;           // frames
+  fullFrameEvery: number;           // frames, 0 = never (acked transport)
   everyNthFrame: number;            // frames (>=1)
   minFrameInterval: number;         // ms (>=0)
   jpegQuality: number;              // 1..100
@@ -98,7 +98,7 @@ function readEnvFallbacks(): Partial<DeviceConfig> {
   if (TS) out.tileSize = intPos(TS)!;
   if (FFTC) out.fullFrameTileCount = intPos(FFTC)!;
   if (FFAT != null) out.fullFrameAreaThreshold = float01(FFAT)!;
-  if (FFE) out.fullFrameEvery = intPos(FFE)!;
+  if (FFE) out.fullFrameEvery = intNonNeg(FFE)!;
   if (ENF) out.everyNthFrame = intPos(ENF)!;
   if (MFI != null) out.minFrameInterval = intNonNeg(MFI)!;
   if (Q) out.jpegQuality = clamp(intPos(Q)!, 1, 100);
@@ -119,7 +119,7 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const tileSize = intPos(params.get("ts")) ?? envFallbacks.tileSize ?? DEFAULTS.tileSize;
   const fullFrameTileCount = intPos(params.get("fftc")) ?? envFallbacks.fullFrameTileCount ?? DEFAULTS.fullFrameTileCount;
   const fullFrameAreaThreshold = float01(params.get("ffat")) ?? envFallbacks.fullFrameAreaThreshold ?? DEFAULTS.fullFrameAreaThreshold;
-  const fullFrameEvery = intPos(params.get("ffe")) ?? envFallbacks.fullFrameEvery ?? DEFAULTS.fullFrameEvery;
+  const fullFrameEvery = intNonNeg(params.get("ffe")) ?? envFallbacks.fullFrameEvery ?? DEFAULTS.fullFrameEvery;  // 0 = never
   const minFrameInterval = intNonNeg(params.get("mfi")) ?? envFallbacks.minFrameInterval ?? DEFAULTS.minFrameInterval;
   const everyNthFrame = intPos(params.get("enf")) ?? envFallbacks.everyNthFrame ?? DEFAULTS.everyNthFrame;
   const jpegQuality = clamp(intPos(params.get("q")) ?? envFallbacks.jpegQuality ?? DEFAULTS.jpegQuality, 1, 100);

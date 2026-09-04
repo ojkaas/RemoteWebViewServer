@@ -375,8 +375,15 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
   };
 
   const queueScreenshot = (b64: string, force: boolean) => {
-    if (force) newDevice.prevFrameHash = 0;
-    newDevice.processor.requestFullFrame();
+    // Only a forced capture (reconnect, reload) resets the tile state. The
+    // periodic fallback screenshot goes through the normal tile diff: on a
+    // slow link the screencast is paused most of the time, so the fallback
+    // fires constantly and used to turn every frame into a full-screen
+    // re-send (100 KB instead of ~6 KB at the kitchen panel).
+    if (force) {
+      newDevice.prevFrameHash = 0;
+      newDevice.processor.requestFullFrame();
+    }
     newDevice.pendingB64 = b64;
     if (!newDevice.throttleTimer) {
       newDevice.throttleTimer = setTimeout(flushPending, 0);

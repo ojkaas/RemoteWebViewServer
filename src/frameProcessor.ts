@@ -59,7 +59,7 @@ export class FrameProcessor {
     if (!this._prev) this._initGrid(rgba.width, rgba.height);
 
     const tHash0 = Date.now();
-    let forceFull = (this._iter % this._cfg.fullFrameEvery) === 0;
+    let forceFull = this._cfg.fullFrameEvery > 0 && (this._iter % this._cfg.fullFrameEvery) === 0;
     if (this._fullFrameRequested) {
       forceFull = true;
       this._fullFrameRequested = false;
