@@ -21,6 +21,7 @@ export type DeviceConfig = {
   rleMaxRatio: number;              // 0 = JPEG only; else lossless RLE for rects <= ratio * raw size
   hwMinPixels: number;              // client decodes rects >= this many pixels in hardware (0 = software only)
   panelPrep: boolean;               // encode at RGB565 bin centres
+  maxInflight: number;              // 0 = server default (ACK_MAX_INFLIGHT); 1 on slow links
 };
 
 const DEFAULTS = {
@@ -41,6 +42,7 @@ const DEFAULTS = {
   rleMaxRatio: 0,
   hwMinPixels: 0,
   panelPrep: true,
+  maxInflight: 0,
 } as const;
 
 const store = new Map<string, DeviceConfig>();
@@ -137,6 +139,7 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const hwMinPixels = intNonNeg(params.get("hwj")) ?? DEFAULTS.hwMinPixels;
   const ppRaw = params.get("pp") ?? env.get("PANEL_PREP").asString();
   const panelPrep = ppRaw != null && ppRaw !== '' ? /^(1|true|yes|on)$/i.test(ppRaw) : DEFAULTS.panelPrep;
+  const maxInflight = intNonNeg(params.get("mif")) ?? DEFAULTS.maxInflight;
   const screencastQuality = clamp(intPos(params.get("scq")) ?? intPos(env.get("SCREENCAST_JPEG_QUALITY").asString()) ?? DEFAULTS.screencastQuality, 1, 100);
 
   const dimensions = getRotatedDimensions(width, height, rotation);
@@ -161,6 +164,7 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     rleMaxRatio,
     hwMinPixels,
     panelPrep,
+    maxInflight,
   };
 }
 
@@ -188,7 +192,8 @@ export function deviceConfigsEqual(
     a.screencastMode === b.screencastMode &&
     a.rleMaxRatio === b.rleMaxRatio &&
     a.hwMinPixels === b.hwMinPixels &&
-    a.panelPrep === b.panelPrep
+    a.panelPrep === b.panelPrep &&
+    a.maxInflight === b.maxInflight
   );
 }
 
@@ -213,6 +218,7 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
     ["rleMaxRatio", cfg.rleMaxRatio],
     ["hwMinPixels", cfg.hwMinPixels],
     ["panelPrep", String(cfg.panelPrep)],
+    ["maxInflight", cfg.maxInflight],
   ];
 
   const head = `[client_connect] id=${id}`;

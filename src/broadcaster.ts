@@ -70,6 +70,7 @@ export class DeviceBroadcaster {
   private _ackPeers = new WeakSet<WebSocket>();
   private _state = new Map<string, BroadcasterState>();
   private readonly _maxInflight: number;
+  private _perDeviceMax = new Map<string, number>();
 
   constructor(opts: { maxInflight?: number } = {}) {
     this._maxInflight = Math.max(1, opts.maxInflight ?? DEFAULT_MAX_INFLIGHT);
@@ -111,7 +112,14 @@ export class DeviceBroadcaster {
 
   forgetDevice(id: string): void {
     this._state.delete(id);
+    this._perDeviceMax.delete(id);
   }
+
+  /** Per-device in-flight limit (1 on slow links halves the queueing latency). */
+  setMaxInflight(id: string, n: number | undefined): void {
+    if (n && n >= 1) this._perDeviceMax.set(id, Math.min(4, n | 0)); else this._perDeviceMax.delete(id);
+  }
+  private _limit(id: string): number { return this._perDeviceMax.get(id) ?? this._maxInflight; }
 
   getClientCount(id: string): number {
     return this._clients.get(id)?.size ?? 0;
@@ -143,7 +151,7 @@ export class DeviceBroadcaster {
         st.ackTimeouts++;
         console.warn(`[broadcaster] ${id}: no ack for frame ${dead.frameId} after ${now - dead.sentAt}ms, continuing`);
       }
-      if (list.length >= this._maxInflight) return false;
+      if (list.length >= this._limit(id)) return false;
     }
     return true;
   }
@@ -237,7 +245,7 @@ export class DeviceBroadcaster {
       ackMode: ackClients > 0,
       inflightFrameId: this._oldestInflight(st)?.frameId ?? null,
       inflightCount: Math.max(0, ...[...st.inflight.values()].map(l => l.length)),
-      maxInflight: this._maxInflight,
+      maxInflight: this._limit(id),
       inflightAgeMs: this._oldestInflight(st) ? now - this._oldestInflight(st)!.sentAt : null,
       framesSent: st.framesSent,
       bytesSent: st.bytesSent,
