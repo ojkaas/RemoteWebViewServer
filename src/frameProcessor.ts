@@ -1,6 +1,6 @@
 import os from "node:os";
 import sharp from "sharp";
-import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES, encodeRle565 } from "./protocol.js";
+import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES, encodeRle565, encodeDeflate565 } from "./protocol.js";
 import { prepareForPanel } from "./panel.js";
 import { hash32 } from "./util.js";
 import { Q5, Q6 } from "./deviceManager.js";
@@ -17,8 +17,10 @@ export type FrameOut = {
   encoding: Encoding;
   hashMs?: number;     // tile hashing + merge
   encodeMs?: number;   // JPEG encoding of the rects
-  rleRects?: number;   // rects sent losslessly
+  rleRects?: number;   // rects sent losslessly (RLE)
   rleBytes?: number;
+  lzRects?: number;    // rects sent losslessly (RGB565 + deflate)
+  lzBytes?: number;
 };
 
 export type FrameProcessorCfg = {
@@ -34,6 +36,8 @@ export type FrameProcessorCfg = {
   // fraction of their raw RGB565 size (flat UI areas, backgrounds). 0 disables.
   rleMaxRatio?: number;
   rleMaxPixels?: number;   // client-side decode buffer limit (pixels)
+  lzMaxRatio?: number;     // 0 = off; else RGB565+deflate for rects that compress to <= ratio * raw size
+  lzLevel?: number;        // deflate level 1..9
   panelPrep?: boolean;     // encode at RGB565 bin centres (exact reproduction on the panel)
   hwMinPixels?: number;    // rects with at least this many pixels are decoded by the P4 hardware (0 = never)
 };
@@ -102,6 +106,8 @@ export class FrameProcessor {
     out.encodeMs = Date.now() - tEnc0;
     out.rleRects = out.rects.filter(r => r.enc === Encoding.RAW565_RLE).length;
     out.rleBytes = out.rects.filter(r => r.enc === Encoding.RAW565_RLE).reduce((n, r) => n + r.data.length, 0);
+    out.lzRects = out.rects.filter(r => r.enc === Encoding.RAW565_DEFLATE).length;
+    out.lzBytes = out.rects.filter(r => r.enc === Encoding.RAW565_DEFLATE).reduce((n, r) => n + r.data.length, 0);
 
     const maxBytesPerTile = this._cfg.maxBytesPerMessage - FRAME_HEADER_BYTES - TILE_HEADER_BYTES;
     for (let i = 0; i < out.rects.length; i++) {
@@ -344,6 +350,15 @@ export class FrameProcessor {
 
   /** Lossless RLE when the rect is flat enough, else the frame's encoding. */
   private async _encodeRect(raw: Buffer, x: number, y: number, w: number, h: number, enc: Encoding): Promise<Rect> {
+    // Lossless first: flat UI compresses far better than JPEG q100 and is
+    // pixel-exact. Photo-like rects (poor deflate ratio) fall through to JPEG.
+    const lzRatio = this._cfg.lzMaxRatio ?? 0;
+    if (lzRatio > 0) {
+      const lz = encodeDeflate565(raw, w, h, this._cfg.lzLevel ?? 6);
+      if (lz.length <= Math.max(64, w * h * 2 * lzRatio)) {
+        return { x, y, w, h, data: lz, enc: Encoding.RAW565_DEFLATE };
+      }
+    }
     const ratio = this._cfg.rleMaxRatio ?? 0;
     const maxPx = this._cfg.rleMaxPixels ?? 32768;
     if (ratio > 0 && w * h <= maxPx) {

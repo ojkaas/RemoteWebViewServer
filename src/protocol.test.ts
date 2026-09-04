@@ -1,4 +1,5 @@
 import { describe, it, expect } from "vitest";
+import { randomBytes } from "node:crypto";
 import {
   FLAG_OPENURL_FORCE,
   FLAG_LAST_OF_FRAME,
@@ -15,6 +16,8 @@ import {
   FRAME_ACK_BYTES,
   encodeRle565,
   decodeRle565,
+  encodeDeflate565,
+  decodeDeflate565,
 } from "./protocol.js";
 
 function buildOpenURL(url: string, flags: number): Buffer {
@@ -108,5 +111,32 @@ describe("Frame packets", () => {
     expect(heads.every(h => h.flags & FLAG_IS_FULL_FRAME)).toBe(true);
     expect(heads.slice(0, -1).every(h => (h.flags & FLAG_LAST_OF_FRAME) === 0)).toBe(true);
     expect(heads[2].flags & FLAG_LAST_OF_FRAME).toBe(FLAG_LAST_OF_FRAME);
+  });
+});
+
+describe("deflate565", () => {
+  it("round-trips RGB565 exactly and beats raw size on flat content", () => {
+    const w = 64, h = 64;
+    const rgba = Buffer.alloc(w * h * 4);
+    for (let i = 0; i < w * h; i++) {
+      const y = (i / w) | 0;
+      rgba[i * 4] = y < 32 ? 5 : 200; rgba[i * 4 + 1] = 7; rgba[i * 4 + 2] = (i % 7 === 0) ? 250 : 13; rgba[i * 4 + 3] = 255;
+    }
+    const lz = encodeDeflate565(rgba, w, h, 6);
+    expect(lz.length).toBeLessThan(w * h * 2 * 0.1);
+    const px = decodeDeflate565(lz, w, h)!;
+    expect(px).not.toBeNull();
+    for (let i = 0; i < w * h; i++) {
+      const exp = ((rgba[i * 4] & 0xF8) << 8) | ((rgba[i * 4 + 1] & 0xFC) << 3) | (rgba[i * 4 + 2] >> 3);
+      expect(px[i]).toBe(exp);
+    }
+  });
+
+  it("noise compresses poorly (so it would fall back to JPEG)", () => {
+    const w = 64, h = 64;
+    const rgba = Buffer.alloc(w * h * 4);
+    randomBytes(rgba.length).copy(rgba);
+    const lz = encodeDeflate565(rgba, w, h, 6);
+    expect(lz.length).toBeGreaterThan(w * h * 2 * 0.5);
   });
 });

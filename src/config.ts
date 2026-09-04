@@ -19,6 +19,8 @@ export type DeviceConfig = {
   reducedMotion: boolean;           // emulate prefers-reduced-motion for this device
   screencastMode: 'stream' | 'ondemand'; // ondemand: one Chromium capture per frame we want
   rleMaxRatio: number;              // 0 = JPEG only; else lossless RLE for rects <= ratio * raw size
+  lzMaxRatio: number;               // 0 = off; else RGB565+deflate for rects that compress to <= ratio * raw size
+  lzLevel: number;                  // deflate level 1..9
   hwMinPixels: number;              // client decodes rects >= this many pixels in hardware (0 = software only)
   panelPrep: boolean;               // encode at RGB565 bin centres
   maxInflight: number;              // 0 = server default (ACK_MAX_INFLIGHT); 1 on slow links
@@ -40,6 +42,8 @@ const DEFAULTS = {
   reducedMotion: false,
   screencastMode: 'stream',
   rleMaxRatio: 0,
+  lzMaxRatio: 0,
+  lzLevel: 6,
   hwMinPixels: 0,
   panelPrep: true,
   maxInflight: 0,
@@ -134,6 +138,9 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const reducedMotion = prmRaw != null ? /^(1|true|yes|on)$/i.test(prmRaw) : /^(1|true|yes|on)$/i.test(env.get("PREFERS_REDUCED_MOTION").asString() ?? '');
   const scmRaw = params.get("scm") ?? env.get("SCREENCAST_MODE").asString();
   const screencastMode: 'stream' | 'ondemand' = scmRaw && /^on-?demand$/i.test(scmRaw) ? 'ondemand' : DEFAULTS.screencastMode;
+  const lzRaw = params.get("lz") ?? env.get("LZ_MAX_RATIO").asString();
+  const lzMaxRatio = lzRaw != null && lzRaw !== '' && Number.isFinite(Number(lzRaw)) ? Math.min(1, Math.max(0, Number(lzRaw))) : DEFAULTS.lzMaxRatio;
+  const lzLevel = clamp(intPos(params.get("lzl")) ?? env.get("LZ_LEVEL").asIntPositive() ?? DEFAULTS.lzLevel, 1, 9);
   const rleRaw = params.get("rle") ?? env.get("RLE_MAX_RATIO").asString();
   const rleMaxRatio = rleRaw != null && rleRaw !== '' && Number.isFinite(Number(rleRaw)) ? Math.min(1, Math.max(0, Number(rleRaw))) : DEFAULTS.rleMaxRatio;
   const hwMinPixels = intNonNeg(params.get("hwj")) ?? DEFAULTS.hwMinPixels;
@@ -162,6 +169,8 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     reducedMotion,
     screencastMode,
     rleMaxRatio,
+    lzMaxRatio,
+    lzLevel,
     hwMinPixels,
     panelPrep,
     maxInflight,
@@ -191,6 +200,8 @@ export function deviceConfigsEqual(
     a.reducedMotion === b.reducedMotion &&
     a.screencastMode === b.screencastMode &&
     a.rleMaxRatio === b.rleMaxRatio &&
+    a.lzMaxRatio === b.lzMaxRatio &&
+    a.lzLevel === b.lzLevel &&
     a.hwMinPixels === b.hwMinPixels &&
     a.panelPrep === b.panelPrep &&
     a.maxInflight === b.maxInflight
@@ -216,6 +227,8 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
     ["reducedMotion", String(cfg.reducedMotion)],
     ["screencastMode", cfg.screencastMode],
     ["rleMaxRatio", cfg.rleMaxRatio],
+    ["lzMaxRatio", cfg.lzMaxRatio],
+    ["lzLevel", cfg.lzLevel],
     ["hwMinPixels", cfg.hwMinPixels],
     ["panelPrep", String(cfg.panelPrep)],
     ["maxInflight", cfg.maxInflight],

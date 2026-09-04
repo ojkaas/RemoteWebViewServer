@@ -47,7 +47,7 @@ export type DeviceSession = {
   blankStreak: number;
   blankReloads: number;
   blankSince?: number;
-  timing: { decodeMs: number; diffEncodeMs: number; hashMs: number; encodeMs: number; rects: number; rleRects: number; rleBytes: number; captureWaitMs: number; n: number };
+  timing: { decodeMs: number; diffEncodeMs: number; hashMs: number; encodeMs: number; rects: number; rleRects: number; rleBytes: number; lzRects: number; lzBytes: number; captureWaitMs: number; n: number };
   lastCaptureAt?: number;
   createdAt: number;
 
@@ -196,6 +196,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     quantize565: QUANTIZE_565,
     rleMaxRatio: cfg.rleMaxRatio,
     rleMaxPixels: 32768,
+    lzMaxRatio: cfg.lzMaxRatio,
+    lzLevel: cfg.lzLevel,
     panelPrep: cfg.panelPrep,
     hwMinPixels: cfg.hwMinPixels,
   });
@@ -222,7 +224,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     processedFrames: 0,
     skippedUnchanged: 0,
     lastProcessMs: undefined,
-    timing: { decodeMs: 0, diffEncodeMs: 0, hashMs: 0, encodeMs: 0, rects: 0, rleRects: 0, rleBytes: 0, captureWaitMs: 0, n: 0 },
+    timing: { decodeMs: 0, diffEncodeMs: 0, hashMs: 0, encodeMs: 0, rects: 0, rleRects: 0, rleBytes: 0, lzRects: 0, lzBytes: 0, captureWaitMs: 0, n: 0 },
     lastCaptureAt: undefined,
     createdAt: Date.now(),
     pendingScreencastSessions: [],
@@ -308,6 +310,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       dev.timing.rects += out.rects.length;
       dev.timing.rleRects += out.rleRects ?? 0;
       dev.timing.rleBytes += out.rleBytes ?? 0;
+      dev.timing.lzRects += out.lzRects ?? 0;
+      dev.timing.lzBytes += out.lzBytes ?? 0;
       if (dev.lastCaptureAt) dev.timing.captureWaitMs += t0 - dev.lastCaptureAt;
       dev.timing.n++;
       dev.lastProcessMs = elapsed;
@@ -624,6 +628,10 @@ export function getDevicesSnapshot() {
     rleRectShare: d.timing.rects ? Math.round(d.timing.rleRects / d.timing.rects * 100) : null,
     rleBytesTotal: d.timing.rleBytes,
     rleMaxRatio: d.cfg.rleMaxRatio,
+    lzRectShare: d.timing.rects ? Math.round(d.timing.lzRects / d.timing.rects * 100) : null,
+    lzBytesTotal: d.timing.lzBytes,
+    lzMaxRatio: d.cfg.lzMaxRatio,
+    lzLevel: d.cfg.lzLevel,
     hwMinPixels: d.cfg.hwMinPixels,
     panelPrep: d.cfg.panelPrep,
     avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,

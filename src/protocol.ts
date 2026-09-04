@@ -1,3 +1,4 @@
+import zlib from "node:zlib";
 // Remote WebView binary protocol (v1)
 // Layout (LE unless stated otherwise):
 // Frame message:
@@ -40,7 +41,8 @@ export enum Encoding {
   JPEG        = 2,
   RAW565      = 3,
   RAW565_RLE  = 4,
-  RAW565_LZ4  = 5
+  RAW565_LZ4  = 5,
+  RAW565_DEFLATE = 6,   // raw deflate stream of RGB565 little-endian pixels, row-major, w*h*2 bytes
 }
 
 export enum TouchKind {
@@ -224,6 +226,28 @@ export function buildFramePackets(rects: Rect[], enc: Encoding, frameId: number,
 
 // RAW565_RLE: runs of [count u8 (1..255)][pixel u16 LE] in raster order,
 // runs may span rows. Lossless for an RGB565 panel.
+/** Lossless RGB565 + raw deflate. Flat UI (solid areas, text) compresses
+ *  3-4x better than JPEG q100 4:4:4 and reproduces exactly on the panel;
+ *  the ESP32-P4 inflates it with the miniz routine in its ROM. */
+export function encodeDeflate565(rgba: Buffer, w: number, h: number, level = 6): Buffer {
+  const n = w * h;
+  const px = Buffer.allocUnsafe(n * 2);
+  for (let i = 0, j = 0, o = 0; i < n; i++, j += 4, o += 2) {
+    const v = ((rgba[j] & 0xF8) << 8) | ((rgba[j + 1] & 0xFC) << 3) | (rgba[j + 2] >> 3);
+    px[o] = v & 0xFF;
+    px[o + 1] = v >> 8;
+  }
+  return zlib.deflateRawSync(px, { level });
+}
+
+export function decodeDeflate565(data: Buffer, w: number, h: number): Uint16Array | null {
+  const raw = zlib.inflateRawSync(data);
+  if (raw.length !== w * h * 2) return null;
+  const px = new Uint16Array(w * h);
+  for (let i = 0; i < px.length; i++) px[i] = raw[i * 2] | (raw[i * 2 + 1] << 8);
+  return px;
+}
+
 export function encodeRle565(rgba: Buffer, w: number, h: number): Buffer {
   const n = w * h;
   const out = Buffer.allocUnsafe(n * 3 + 3);   // worst case: every pixel its own run
