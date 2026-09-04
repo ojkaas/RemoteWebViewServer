@@ -35,6 +35,8 @@ export type DeviceSession = {
   // full, so Chrome does not capture+encode+ship frames nobody can use.
   screencastPaused: boolean;
   screencastPauses: number;
+  mutationCaptures: number;   // captures triggered by the page's MutationObserver binding
+  quietWakeups: number;       // screencast frames after a quiet period (treated as interactions)
   captureTimer?: NodeJS.Timeout;   // ondemand: scheduled resume
 
   // stats
@@ -89,6 +91,10 @@ function isBlankWhite(rgba: Buffer): boolean {
 const devices = new Map<string, DeviceSession>();
 let _cleanupRunning = false;
 export const broadcaster = new DeviceBroadcaster();
+// A screencast frame after this much silence is the start of an interaction
+// (the pages are static unless something happens); continuous animation never
+// qualifies, so the priority slot cannot become a permanent +1 there.
+const QUIET_MS = 500;
 
 function screencastParams(cfg: DeviceConfig) {
   return {
@@ -232,6 +238,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     blankReloads: 0,
     screencastPaused: false,
     screencastPauses: 0,
+    mutationCaptures: 0,
+    quietWakeups: 0,
     captureAndPush: async () => { },
   };
   devices.set(id, newDevice);
@@ -470,6 +478,10 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       return;
     }
 
+    if (!newDevice.lastCaptureAt || now - newDevice.lastCaptureAt > QUIET_MS) {
+      newDevice.quietWakeups++;
+      broadcaster.markInteraction(newDevice.deviceId);
+    }
     newDevice.lastActive = Date.now();
     newDevice.lastCaptureAt = Date.now();
     newDevice.pendingB64 = evt.data;
@@ -497,6 +509,7 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
       // Something happened on the page (a scan, a state change): let its
       // frame bypass the in-flight limit once, like a touch does.
       broadcaster.markInteraction(newDevice.deviceId);
+      newDevice.mutationCaptures++;
       try {
         await newDevice.captureAndPush('dom-mutation', false);
       } catch { /* session may be closed */ }
@@ -635,6 +648,8 @@ export function getDevicesSnapshot() {
     lzBytesTotal: d.timing.lzBytes,
     lzMaxRatio: d.cfg.lzMaxRatio,
     lzLevel: d.cfg.lzLevel,
+    mutationCaptures: d.mutationCaptures,
+    quietWakeups: d.quietWakeups,
     hwMinPixels: d.cfg.hwMinPixels,
     panelPrep: d.cfg.panelPrep,
     avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,
