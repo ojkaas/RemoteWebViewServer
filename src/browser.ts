@@ -18,6 +18,8 @@ const PRESETS: Record<string, string[]> = {
   default: [],
   swcompositing: ['--disable-gpu-compositing'],
   nogpu: ['--disable-gpu', '--disable-gpu-compositing'],
+  // Intel iGPU via the DRM render node (no X/Wayland): ANGLE on EGL/GBM.
+  gpu: ['--ignore-gpu-blocklist', '--enable-gpu-rasterization', '--enable-zero-copy', '--use-gl=angle', '--use-angle=gl-egl', '--enable-features=VaapiVideoDecodeLinuxGL'],
 };
 
 async function fetchJsonVersionAsync(): Promise<{ webSocketDebuggerUrl: string } | null> {
