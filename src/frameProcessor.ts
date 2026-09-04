@@ -1,5 +1,6 @@
 import os from "node:os";
 import sharp from "sharp";
+import zlib from "node:zlib";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES, encodeRle565, encodeDeflate565 } from "./protocol.js";
 import { prepareForPanel } from "./panel.js";
 import { hash32 } from "./util.js";
@@ -124,16 +125,20 @@ export class FrameProcessor {
 
   private async _processFullFrame(
     rgba: RGBA,
-    tilesInfo: { idx: number; h32: number }[],
+    tilesInfo: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
     encoding: Encoding
   ): Promise<FrameOut> {
-    const rectsForFull = this._splitWholeFrame(rgba.width, rgba.height, this._cfg.fullframeTileCount);
+    // Every tile is (re)sent; tiles are still classified per codec and merged
+    // per class, so a photo in an otherwise flat page goes JPEG while the rest
+    // stays lossless. The merge caps rect sizes (maxW/maxH).
+    const all = tilesInfo.map((t) => ({ ...t, changed: true }));
+    const cls = this._classifyTiles(rgba, all);
+    const mergedRects = this._mergeChangedTiles(all, rgba.width, rgba.height, cls);
 
-    // Encode all tiles in parallel instead of sequentially
     const rects = await Promise.all(
-      rectsForFull.map(async (r) => {
+      mergedRects.map(async (r) => {
         const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-        return this._encodeRect(raw, r.x, r.y, r.w, r.h, encoding);
+        return this._encodeRect(raw, r.x, r.y, r.w, r.h, encoding, r.cls);
       })
     );
 
@@ -142,18 +147,45 @@ export class FrameProcessor {
     return { rects, isFullFrame: true, encoding };
   }
 
+  /** Codec class per tile: 0 = unchanged, 1 = lossless (RGB565+deflate), 2 = JPEG.
+   *  A quick level-1 deflate of the tile's RGB565 bytes measures how "flat"
+   *  it is; photo-like tiles (ratio above lzMaxRatio) go JPEG. Deciding per
+   *  tile (not per merged rect) keeps a photo from dragging a whole flat page
+   *  into JPEG, or a flat page from sending a photo losslessly (2 bytes/px). */
+  private _classifyTiles(rgba: RGBA, tiles: { x: number; y: number; w: number; h: number; idx: number; changed: boolean }[]): number[] {
+    const cls = new Array<number>(tiles.length).fill(0);
+    const lzRatio = this._cfg.lzMaxRatio ?? 0;
+    for (const t of tiles) {
+      if (!t.changed) continue;
+      if (lzRatio <= 0) { cls[t.idx] = 2; continue; }
+      const n = t.w * t.h;
+      const px = Buffer.allocUnsafe(n * 2);
+      for (let yy = 0, o = 0; yy < t.h; yy++) {
+        let j = ((t.y + yy) * rgba.width + t.x) * 4;
+        for (let xx = 0; xx < t.w; xx++, j += 4, o += 2) {
+          const v = ((rgba.data[j] & 0xF8) << 8) | ((rgba.data[j + 1] & 0xFC) << 3) | (rgba.data[j + 2] >> 3);
+          px[o] = v & 0xFF; px[o + 1] = v >> 8;
+        }
+      }
+      const z = zlib.deflateRawSync(px, { level: 1 }).length;
+      cls[t.idx] = z <= Math.max(64, n * 2 * lzRatio) ? 1 : 2;
+    }
+    return cls;
+  }
+
   private async _processPartialFrame(
     rgba: RGBA,
     tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
     encoding: Encoding
   ): Promise<FrameOut> {
-    const mergedRects = this._mergeChangedTiles(tiles, rgba.width, rgba.height);
+    const cls = this._classifyTiles(rgba, tiles);
+    const mergedRects = this._mergeChangedTiles(tiles, rgba.width, rgba.height, cls);
 
     // Encode all merged rects in parallel
     const out = await Promise.all(
       mergedRects.map(async (r) => {
         const raw = this._extractRaw(rgba, r.x, r.y, r.w, r.h);
-        return this._encodeRect(raw, r.x, r.y, r.w, r.h, encoding);
+        return this._encodeRect(raw, r.x, r.y, r.w, r.h, encoding, r.cls);
       })
     );
 
@@ -242,30 +274,34 @@ export class FrameProcessor {
   private _mergeChangedTiles(
     tiles: { x: number; y: number; w: number; h: number; idx: number; h32: number; changed: boolean }[],
     frameW: number,
-    frameH: number
-  ): { x: number; y: number; w: number; h: number }[] {
+    frameH: number,
+    cls?: number[]
+  ): { x: number; y: number; w: number; h: number; cls?: number }[] {
     const cols = this._cols, rows = this._rows;
     const changed: boolean[][] = Array.from({ length: rows }, () => Array<boolean>(cols).fill(false));
     const visited: boolean[][] = Array.from({ length: rows }, () => Array<boolean>(cols).fill(false));
+    const klass: number[][] = Array.from({ length: rows }, () => Array<number>(cols).fill(0));
 
     for (let i = 0; i < tiles.length; i++) {
       const ty = Math.floor(i / cols);
       const tx = i % cols;
       changed[ty][tx] = tiles[i].changed;
+      klass[ty][tx] = cls ? cls[tiles[i].idx] : 0;
     }
 
     const { widths, heights, xOffsets, yOffsets } = this._calcGridSplits(frameW, frameH);
     const { maxW, maxH } = this._getMaxFullTileSize(frameW, frameH);
 
-    const rects: { x: number; y: number; w: number; h: number }[] = [];
+    const rects: { x: number; y: number; w: number; h: number; cls?: number }[] = [];
 
     for (let r = 0; r < rows; r++) {
       for (let c = 0; c < cols; c++) {
         if (!changed[r][c] || visited[r][c]) continue;
+        const k = klass[r][c];
 
-        // grow horizontally
+        // grow horizontally (only over tiles of the same codec class)
         let wTiles = 0, pxW = 0;
-        while (c + wTiles < cols && changed[r][c + wTiles] && !visited[r][c + wTiles]) {
+        while (c + wTiles < cols && changed[r][c + wTiles] && !visited[r][c + wTiles] && klass[r][c + wTiles] === k) {
           const nextW = pxW + widths[c + wTiles];
           if (nextW > maxW) break;
           pxW = nextW;
@@ -279,14 +315,14 @@ export class FrameProcessor {
           const nextH = pxH + heights[r + hTiles];
           if (nextH > maxH) break;
           for (let cc = c; cc < c + wTiles; cc++) {
-            if (!changed[r + hTiles][cc] || visited[r + hTiles][cc]) { canGrow = false; break; }
+            if (!changed[r + hTiles][cc] || visited[r + hTiles][cc] || klass[r + hTiles][cc] !== k) { canGrow = false; break; }
           }
           if (!canGrow) break;
           pxH = nextH;
           hTiles++;
         }
 
-        rects.push({ x: xOffsets[c], y: yOffsets[r], w: pxW, h: pxH });
+        rects.push({ x: xOffsets[c], y: yOffsets[r], w: pxW, h: pxH, cls: cls ? k : undefined });
 
         for (let rr = r; rr < r + hTiles; rr++) {
           for (let cc = c; cc < c + wTiles; cc++) {
@@ -349,13 +385,14 @@ export class FrameProcessor {
   }
 
   /** Lossless RLE when the rect is flat enough, else the frame's encoding. */
-  private async _encodeRect(raw: Buffer, x: number, y: number, w: number, h: number, enc: Encoding): Promise<Rect> {
-    // Lossless first: flat UI compresses far better than JPEG q100 and is
-    // pixel-exact. Photo-like rects (poor deflate ratio) fall through to JPEG.
+  private async _encodeRect(raw: Buffer, x: number, y: number, w: number, h: number, enc: Encoding, cls?: number): Promise<Rect> {
+    // Lossless (RGB565+deflate) for flat UI rects: 3-4x smaller than JPEG q100
+    // and pixel-exact. The class comes from _classifyTiles; without one
+    // (legacy callers) the rect's own deflate ratio decides.
     const lzRatio = this._cfg.lzMaxRatio ?? 0;
-    if (lzRatio > 0) {
+    if (lzRatio > 0 && cls !== 2) {
       const lz = encodeDeflate565(raw, w, h, this._cfg.lzLevel ?? 6);
-      if (lz.length <= Math.max(64, w * h * 2 * lzRatio)) {
+      if (cls === 1 || lz.length <= Math.max(64, w * h * 2 * lzRatio)) {
         return { x, y, w, h, data: lz, enc: Encoding.RAW565_DEFLATE };
       }
     }
