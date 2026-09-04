@@ -69,8 +69,11 @@ def main():
     ap.add_argument("--device", required=True)
     ap.add_argument("--runs", type=int, default=5)
     ap.add_argument("--label", default="")
+    ap.add_argument("--barcodes", help="comma-separated barcodes to cycle through (default: the built-in mock set)")
     ap.add_argument("--min-kb", type=int, default=15, help="bytes a real screen transition must carry (default 15 KB; use ~4 with reduced motion)")
     args = ap.parse_args()
+    if args.barcodes:
+        BARCODES[:] = [b.strip() for b in args.barcodes.split(',') if b.strip()]
 
     scan_ms, clear_ms = [], []
     for i in range(args.runs):
