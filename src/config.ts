@@ -19,6 +19,8 @@ export type DeviceConfig = {
   reducedMotion: boolean;           // emulate prefers-reduced-motion for this device
   screencastMode: 'stream' | 'ondemand'; // ondemand: one Chromium capture per frame we want
   rleMaxRatio: number;              // 0 = JPEG only; else lossless RLE for rects <= ratio * raw size
+  hwMinPixels: number;              // client decodes rects >= this many pixels in hardware (0 = software only)
+  panelPrep: boolean;               // encode at RGB565 bin centres
 };
 
 const DEFAULTS = {
@@ -37,6 +39,8 @@ const DEFAULTS = {
   reducedMotion: false,
   screencastMode: 'stream',
   rleMaxRatio: 0,
+  hwMinPixels: 0,
+  panelPrep: true,
 } as const;
 
 const store = new Map<string, DeviceConfig>();
@@ -130,6 +134,9 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
   const screencastMode: 'stream' | 'ondemand' = scmRaw && /^on-?demand$/i.test(scmRaw) ? 'ondemand' : DEFAULTS.screencastMode;
   const rleRaw = params.get("rle") ?? env.get("RLE_MAX_RATIO").asString();
   const rleMaxRatio = rleRaw != null && rleRaw !== '' && Number.isFinite(Number(rleRaw)) ? Math.min(1, Math.max(0, Number(rleRaw))) : DEFAULTS.rleMaxRatio;
+  const hwMinPixels = intNonNeg(params.get("hwj")) ?? DEFAULTS.hwMinPixels;
+  const ppRaw = params.get("pp") ?? env.get("PANEL_PREP").asString();
+  const panelPrep = ppRaw != null && ppRaw !== '' ? /^(1|true|yes|on)$/i.test(ppRaw) : DEFAULTS.panelPrep;
   const screencastQuality = clamp(intPos(params.get("scq")) ?? intPos(env.get("SCREENCAST_JPEG_QUALITY").asString()) ?? DEFAULTS.screencastQuality, 1, 100);
 
   const dimensions = getRotatedDimensions(width, height, rotation);
@@ -152,6 +159,8 @@ export function makeConfigFromParams(params: URLSearchParams): DeviceConfig {
     reducedMotion,
     screencastMode,
     rleMaxRatio,
+    hwMinPixels,
+    panelPrep,
   };
 }
 
@@ -177,7 +186,9 @@ export function deviceConfigsEqual(
     a.screencastQuality === b.screencastQuality &&
     a.reducedMotion === b.reducedMotion &&
     a.screencastMode === b.screencastMode &&
-    a.rleMaxRatio === b.rleMaxRatio
+    a.rleMaxRatio === b.rleMaxRatio &&
+    a.hwMinPixels === b.hwMinPixels &&
+    a.panelPrep === b.panelPrep
   );
 }
 
@@ -200,6 +211,8 @@ export function logDeviceConfig(id: string, cfg: DeviceConfig): void {
     ["reducedMotion", String(cfg.reducedMotion)],
     ["screencastMode", cfg.screencastMode],
     ["rleMaxRatio", cfg.rleMaxRatio],
+    ["hwMinPixels", cfg.hwMinPixels],
+    ["panelPrep", String(cfg.panelPrep)],
   ];
 
   const head = `[client_connect] id=${id}`;

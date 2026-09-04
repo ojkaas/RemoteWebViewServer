@@ -7,7 +7,7 @@ import { InputRouter } from "./inputRouter.js";
 import { bootstrapAsync } from './browser.js';
 import { MsgType, parseFrameAckPacket } from './protocol.js';
 
-const SERVER_VERSION = process.env.npm_package_version ?? "1.1.23";
+const SERVER_VERSION = process.env.npm_package_version ?? "1.1.24";
 const WS_PORT = env.get("WS_PORT").default("8081").asIntPositive();
 const HEALTH_PORT = env.get("HEALTH_PORT").default("18080").asIntPositive();
 // WebSocket-level heartbeat. A peer that does not answer a ping within one

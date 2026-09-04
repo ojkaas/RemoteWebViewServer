@@ -6,8 +6,8 @@ own device id (the server closes the older socket), then verifies through
 /stats alone that the device reconnected, received the forced full frame and
 acked it. Needs only the `websockets` package.
 
-    python tools/loop_test.py --server 192.168.178.62:8081 --device esp32-80f1b2d0b18b
-    python tools/loop_test.py --server 192.168.178.62:8081 --watch      # live stats
+    python tools/loop_test.py --server <ubumoxy-ip>:8081 --device esp32-80f1b2d0b18b
+    python tools/loop_test.py --server <ubumoxy-ip>:8081 --watch      # live stats
 """
 import argparse
 import asyncio

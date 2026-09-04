@@ -1,6 +1,7 @@
 import os from "node:os";
 import sharp from "sharp";
 import { Encoding, FRAME_HEADER_BYTES, TILE_HEADER_BYTES, encodeRle565 } from "./protocol.js";
+import { prepareForPanel } from "./panel.js";
 import { hash32 } from "./util.js";
 import { Q5, Q6 } from "./deviceManager.js";
 
@@ -33,6 +34,8 @@ export type FrameProcessorCfg = {
   // fraction of their raw RGB565 size (flat UI areas, backgrounds). 0 disables.
   rleMaxRatio?: number;
   rleMaxPixels?: number;   // client-side decode buffer limit (pixels)
+  panelPrep?: boolean;     // encode at RGB565 bin centres (exact reproduction on the panel)
+  hwMinPixels?: number;    // rects with at least this many pixels are decoded by the P4 hardware (0 = never)
 };
 
 export class FrameProcessor {
@@ -348,6 +351,10 @@ export class FrameProcessor {
       if (rle.length <= Math.max(64, w * h * 2 * ratio)) {
         return { x, y, w, h, data: rle, enc: Encoding.RAW565_RLE };
       }
+    }
+    if (this._cfg.panelPrep && enc === Encoding.JPEG) {
+      const hw = (this._cfg.hwMinPixels ?? 0) > 0 && w * h >= (this._cfg.hwMinPixels ?? 0);
+      prepareForPanel(raw, hw);
     }
     const data = await this._encode(raw, w, h, enc);
     return { x, y, w, h, data };

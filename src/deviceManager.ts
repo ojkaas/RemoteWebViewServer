@@ -183,6 +183,8 @@ export async function ensureDeviceAsync(id: string, cfg: DeviceConfig): Promise<
     quantize565: QUANTIZE_565,
     rleMaxRatio: cfg.rleMaxRatio,
     rleMaxPixels: 32768,
+    panelPrep: cfg.panelPrep,
+    hwMinPixels: cfg.hwMinPixels,
   });
 
   const newDevice: DeviceSession = {
@@ -566,6 +568,8 @@ export function getDevicesSnapshot() {
     rleRectShare: d.timing.rects ? Math.round(d.timing.rleRects / d.timing.rects * 100) : null,
     rleBytesTotal: d.timing.rleBytes,
     rleMaxRatio: d.cfg.rleMaxRatio,
+    hwMinPixels: d.cfg.hwMinPixels,
+    panelPrep: d.cfg.panelPrep,
     avgCaptureWaitMs: d.timing.n ? Math.round(d.timing.captureWaitMs / d.timing.n * 10) / 10 : null,
     screencastFormat: d.cfg.screencastFormat,
     screencastMode: d.cfg.screencastMode,
